@@ -17,11 +17,15 @@ Running `cacheferret` without a command is always read-only.
 ## Install
 
 ```sh
+# Homebrew on macOS or Linux
+brew install rvben/tap/cacheferret
+
+# Cargo
 cargo install cacheferret
 ```
 
-Release archives and a Homebrew formula are also produced for Intel and ARM
-Linux and macOS.
+Release archives include checksums, documentation, and completions for Bash,
+Zsh, Fish, PowerShell, and Elvish on Intel and ARM Linux and macOS.
 
 ## Quick start
 
@@ -152,6 +156,9 @@ cacheferret schema clean
 make check        # format, clippy, and tests
 make conformance  # build and score the CLI against clispec.dev
 ```
+
+See [docs/releasing.md](docs/releasing.md) for the release checklist and
+[SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 The generated mascot and wordmark in `assets/` are initial brand concepts. A
 future design pass can trace the chosen mark into deterministic SVG assets.
