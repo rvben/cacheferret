@@ -36,6 +36,9 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Run tests
         run: make test
+      - name: Run Linux end-to-end safety tests
+        if: runner.os == 'Linux'
+        run: make test-linux-e2e
 
   all-checks-passed:
     name: All checks passed

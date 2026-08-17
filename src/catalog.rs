@@ -507,96 +507,111 @@ fn valid_cachedir_tag(path: &Path) -> bool {
 }
 
 pub(crate) fn global_paths() -> Vec<GlobalPath> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
+    let home = home_dir();
     let cache = env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".cache"));
+        .or_else(|| home.as_ref().map(|home| home.join(".cache")));
     let data = env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share"));
-    let mac_caches = home.join("Library/Caches");
+        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
 
-    let mut paths = vec![
-        global(
-            home.join(".cargo/registry/cache"),
-            "cargo-registry",
-            "rust",
-            true,
-        ),
-        global(home.join(".cargo/git/checkouts"), "cargo-git", "rust", true),
-        global(home.join(".npm/_cacache"), "npm-cache", "javascript", true),
-        global(
-            home.join(".bun/install/cache"),
-            "bun-cache",
-            "javascript",
-            true,
-        ),
-        global(
-            home.join(".gradle/caches"),
-            "gradle-global-cache",
-            "jvm",
-            true,
-        ),
-        global_blocked(home.join(".m2/repository"), "maven-repository", "jvm", true),
-        global(
-            home.join(".nuget/packages"),
-            "nuget-packages",
-            "dotnet",
-            true,
-        ),
-        global(home.join(".pub-cache"), "pub-cache", "dart", true),
-        global(home.join(".stack/programs"), "stack-cache", "haskell", true),
-        global(
-            home.join(".stack/snapshots"),
-            "stack-cache",
-            "haskell",
-            true,
-        ),
-        global(home.join(".stack/indices"), "stack-cache", "haskell", true),
-        global(home.join(".cabal/store"), "cabal-store", "haskell", true),
-        global(home.join(".hex/packages"), "hex-cache", "elixir", true),
-        global(cache.join("pip"), "pip-cache", "python", true),
-        global(cache.join("uv"), "uv-cache", "python", true),
-        global(cache.join("deno"), "deno-cache", "javascript", true),
-        global(cache.join("go-build"), "go-build-cache", "go", false),
-        global(cache.join("ccache"), "ccache", "cpp", false),
-        global(cache.join("zig"), "zig-global-cache", "zig", true),
-        global(cache.join("composer"), "composer-cache", "php", true),
-        global_blocked(cache.join("R/renv"), "renv-cache", "r", true),
-        global(data.join("pnpm/store"), "pnpm-store", "javascript", true),
-        global(home.join("go/pkg/mod"), "go-module-cache", "go", true),
-        global(home.join(".swiftpm/cache"), "swiftpm-cache", "swift", true),
-    ];
-
-    if cfg!(target_os = "macos") {
+    let mut paths = Vec::new();
+    if let Some(home) = &home {
         paths.extend([
-            global(mac_caches.join("pip"), "pip-cache", "python", true),
-            global(mac_caches.join("uv"), "uv-cache", "python", true),
-            global(mac_caches.join("deno"), "deno-cache", "javascript", true),
-            global(mac_caches.join("go-build"), "go-build-cache", "go", false),
-            global(mac_caches.join("composer"), "composer-cache", "php", true),
-            global(mac_caches.join("ccache"), "ccache", "cpp", false),
             global(
-                home.join("Library/pnpm/store"),
-                "pnpm-store",
+                home.join(".cargo/registry/cache"),
+                "cargo-registry",
+                "rust",
+                true,
+            ),
+            global(home.join(".cargo/git/checkouts"), "cargo-git", "rust", true),
+            global(home.join(".npm/_cacache"), "npm-cache", "javascript", true),
+            global(
+                home.join(".bun/install/cache"),
+                "bun-cache",
                 "javascript",
                 true,
             ),
             global(
-                home.join("Library/Developer/Xcode/DerivedData"),
-                "xcode-derived-data",
-                "swift",
-                false,
-            ),
-            global(
-                mac_caches.join("org.swift.swiftpm"),
-                "swiftpm-cache",
-                "swift",
+                home.join(".gradle/caches"),
+                "gradle-global-cache",
+                "jvm",
                 true,
             ),
+            global_blocked(home.join(".m2/repository"), "maven-repository", "jvm", true),
+            global(
+                home.join(".nuget/packages"),
+                "nuget-packages",
+                "dotnet",
+                true,
+            ),
+            global(home.join(".pub-cache"), "pub-cache", "dart", true),
+            global(home.join(".stack/programs"), "stack-cache", "haskell", true),
+            global(
+                home.join(".stack/snapshots"),
+                "stack-cache",
+                "haskell",
+                true,
+            ),
+            global(home.join(".stack/indices"), "stack-cache", "haskell", true),
+            global(home.join(".cabal/store"), "cabal-store", "haskell", true),
+            global(home.join(".hex/packages"), "hex-cache", "elixir", true),
+            global(home.join("go/pkg/mod"), "go-module-cache", "go", true),
+            global(home.join(".swiftpm/cache"), "swiftpm-cache", "swift", true),
         ]);
+
+        if cfg!(target_os = "macos") {
+            let mac_caches = home.join("Library/Caches");
+            paths.extend([
+                global(mac_caches.join("pip"), "pip-cache", "python", true),
+                global(mac_caches.join("uv"), "uv-cache", "python", true),
+                global(mac_caches.join("deno"), "deno-cache", "javascript", true),
+                global(mac_caches.join("go-build"), "go-build-cache", "go", false),
+                global(mac_caches.join("composer"), "composer-cache", "php", true),
+                global(mac_caches.join("ccache"), "ccache", "cpp", false),
+                global(
+                    home.join("Library/pnpm/store"),
+                    "pnpm-store",
+                    "javascript",
+                    true,
+                ),
+                global(
+                    home.join("Library/Developer/Xcode/DerivedData"),
+                    "xcode-derived-data",
+                    "swift",
+                    false,
+                ),
+                global(
+                    mac_caches.join("org.swift.swiftpm"),
+                    "swiftpm-cache",
+                    "swift",
+                    true,
+                ),
+            ]);
+        }
+
+        add_ruby_gem_caches(home, &mut paths);
+    }
+
+    if let Some(cache) = &cache {
+        paths.extend([
+            global(cache.join("pip"), "pip-cache", "python", true),
+            global(cache.join("uv"), "uv-cache", "python", true),
+            global(cache.join("deno"), "deno-cache", "javascript", true),
+            global(cache.join("go-build"), "go-build-cache", "go", false),
+            global(cache.join("ccache"), "ccache", "cpp", false),
+            global(cache.join("zig"), "zig-global-cache", "zig", true),
+            global(cache.join("composer"), "composer-cache", "php", true),
+            global_blocked(cache.join("R/renv"), "renv-cache", "r", true),
+        ]);
+    }
+    if let Some(data) = &data {
+        paths.push(global(
+            data.join("pnpm/store"),
+            "pnpm-store",
+            "javascript",
+            true,
+        ));
     }
 
     for (variable, kind, ecosystem, network) in [
@@ -612,21 +627,22 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
     ] {
         if let Some(value) = env::var_os(variable) {
             let path = PathBuf::from(value);
-            if safe_dynamic_global_path(variable, &path, &home) {
+            if safe_dynamic_global_path(variable, &path, home.as_deref()) {
                 paths.push(global(path, kind, ecosystem, network));
             }
         }
     }
-
-    add_ruby_gem_caches(&home, &mut paths);
 
     let mut seen = HashSet::new();
     paths.retain(|path| seen.insert(path.path.clone()));
     paths
 }
 
-fn safe_dynamic_global_path(variable: &str, path: &Path, home: &Path) -> bool {
-    if !path.is_absolute() || path == Path::new("/") || path == home || home.starts_with(path) {
+fn safe_dynamic_global_path(variable: &str, path: &Path, home: Option<&Path>) -> bool {
+    if !path.is_absolute()
+        || path == Path::new("/")
+        || home.is_some_and(|home| path == home || home.starts_with(path))
+    {
         return false;
     }
     let leaf = path
@@ -690,17 +706,26 @@ mod tests {
     #[test]
     fn dynamic_cache_paths_reject_broad_or_unrelated_directories() {
         let home = Path::new("/home/developer");
-        assert!(!safe_dynamic_global_path("GOCACHE", Path::new("/"), home));
-        assert!(!safe_dynamic_global_path("GOCACHE", home, home));
+        assert!(!safe_dynamic_global_path(
+            "GOCACHE",
+            Path::new("/"),
+            Some(home)
+        ));
+        assert!(!safe_dynamic_global_path("GOCACHE", home, Some(home)));
         assert!(!safe_dynamic_global_path(
             "GOCACHE",
             Path::new("/tmp"),
-            home
+            Some(home)
         ));
         assert!(safe_dynamic_global_path(
             "GOCACHE",
             Path::new("/var/cache/go-build"),
-            home
+            Some(home)
+        ));
+        assert!(safe_dynamic_global_path(
+            "GOCACHE",
+            Path::new("/var/cache/go-build"),
+            None
         ));
     }
 
