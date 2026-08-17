@@ -113,8 +113,29 @@ pub struct CleanReport {
     pub network_restore_selected: usize,
     pub bytes_selected: u64,
     pub bytes_reclaimed_estimate: u64,
+    pub selected_targets: Vec<CleanTarget>,
     pub cleaned_paths: Vec<PathBuf>,
     pub skipped_paths: Vec<SkippedPath>,
+}
+
+/// A compact, reviewable description of a cleanup target.
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanTarget {
+    pub kind: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub network_restore: bool,
+}
+
+impl From<&CacheCandidate> for CleanTarget {
+    fn from(candidate: &CacheCandidate) -> Self {
+        Self {
+            kind: candidate.kind.clone(),
+            path: candidate.path.clone(),
+            bytes: candidate.bytes,
+            network_restore: candidate.network_restore,
+        }
+    }
 }
 
 /// Candidate refused during final validation or deletion.

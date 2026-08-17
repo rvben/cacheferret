@@ -326,7 +326,7 @@ fn run_clean(args: CleanArgs, format: OutputFormat) -> Result<String, Error> {
         declined
     };
     report.protected_skipped = protected_skipped;
-    report.policy_skipped = policy_skipped;
+    report.policy_skipped += policy_skipped;
 
     if !report.dry_run
         && report.confirmed
@@ -350,6 +350,20 @@ fn prompt_for_confirmation(candidates: &[CacheCandidate]) -> Result<bool, Error>
         .iter()
         .filter(|candidate| candidate.network_restore)
         .count();
+    eprintln!("SIZE\tRESTORE\tKIND\tPATH");
+    for candidate in candidates {
+        eprintln!(
+            "{}\t{}\t{}\t{}",
+            format_bytes(candidate.bytes),
+            if candidate.network_restore {
+                "network"
+            } else {
+                "local"
+            },
+            candidate.kind,
+            candidate.path.display()
+        );
+    }
     eprint!(
         "Clean {} cache directories ({})? {} require downloads to restore. [y/N] ",
         candidates.len(),
@@ -415,32 +429,52 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
             let value = serde_json::to_value(report).expect("clean report serializes");
             project_object(value, fields).to_string()
         }
-        OutputFormat::Text => format!(
-            "{} {} of {} selected caches; {} protected; {} scan-only; estimated {} reclaimed{}",
-            if report.dry_run {
-                "Would clean"
-            } else {
-                "Cleaned"
-            },
-            if report.dry_run {
-                report.selected
-            } else {
-                report.cleaned
-            },
-            report.selected,
-            report.protected_skipped,
-            report.policy_skipped,
-            format_bytes(if report.dry_run {
-                report.bytes_selected
-            } else {
-                report.bytes_reclaimed_estimate
-            }),
-            if report.skipped > 0 {
-                format!("; {} refused during final validation", report.skipped)
-            } else {
-                String::new()
+        OutputFormat::Text => {
+            let summary = format!(
+                "{} {} of {} selected caches; {} protected; {} scan-only; estimated {} reclaimed{}",
+                if report.dry_run {
+                    "Would clean"
+                } else {
+                    "Cleaned"
+                },
+                if report.dry_run {
+                    report.selected
+                } else {
+                    report.cleaned
+                },
+                report.selected,
+                report.protected_skipped,
+                report.policy_skipped,
+                format_bytes(if report.dry_run {
+                    report.bytes_selected
+                } else {
+                    report.bytes_reclaimed_estimate
+                }),
+                if report.skipped > 0 {
+                    format!("; {} refused during final validation", report.skipped)
+                } else {
+                    String::new()
+                }
+            );
+            if !report.dry_run || report.selected_targets.is_empty() {
+                return summary;
             }
-        ),
+            let mut lines = vec![summary, "SIZE\tRESTORE\tKIND\tPATH".to_owned()];
+            lines.extend(report.selected_targets.iter().map(|target| {
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    format_bytes(target.bytes),
+                    if target.network_restore {
+                        "network"
+                    } else {
+                        "local"
+                    },
+                    target.kind,
+                    target.path.display()
+                )
+            }));
+            lines.join("\n")
+        }
     }
 }
 
@@ -457,7 +491,7 @@ const CANDIDATE_FIELDS: [&str; 10] = [
     "cleanable",
 ];
 
-const CLEAN_FIELDS: [&str; 13] = [
+const CLEAN_FIELDS: [&str; 14] = [
     "changed",
     "dry_run",
     "confirmed",
@@ -469,6 +503,7 @@ const CLEAN_FIELDS: [&str; 13] = [
     "network_restore_selected",
     "bytes_selected",
     "bytes_reclaimed_estimate",
+    "selected_targets",
     "cleaned_paths",
     "skipped_paths",
 ];

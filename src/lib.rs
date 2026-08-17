@@ -11,8 +11,8 @@ pub use catalog::{catalog, default_roots};
 pub use cleaner::clean_candidates;
 pub use error::Error;
 pub use model::{
-    CacheCandidate, CacheScope, CatalogEntry, CleanReport, DiscoveryOptions, OutputFormat,
-    ScanReport, ScopeFilter,
+    CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveryOptions,
+    OutputFormat, ScanReport, ScopeFilter,
 };
 pub use scanner::discover;
 

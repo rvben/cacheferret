@@ -124,6 +124,13 @@ fn dry_run_reports_without_deleting() {
     let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(value["dry_run"], true);
     assert_eq!(value["selected"], 1);
+    assert_eq!(value["selected_targets"][0]["kind"], "cargo-target");
+    assert_eq!(value["selected_targets"][0]["bytes"], 64);
+    let expected_path = Path::new(&root).canonicalize().unwrap().join("demo/target");
+    assert_eq!(
+        value["selected_targets"][0]["path"],
+        expected_path.to_string_lossy().as_ref()
+    );
     assert!(Path::new(&root).join("demo/target").exists());
 }
 

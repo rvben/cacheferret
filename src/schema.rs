@@ -59,6 +59,19 @@ pub fn contract() -> Value {
                     {"name": "network_restore_selected", "type": "integer"},
                     {"name": "bytes_selected", "type": "integer"},
                     {"name": "bytes_reclaimed_estimate", "type": "integer"},
+                    {
+                        "name": "selected_targets",
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "fields": [
+                                {"name": "kind", "type": "string"},
+                                {"name": "path", "type": "string"},
+                                {"name": "bytes", "type": "integer"},
+                                {"name": "network_restore", "type": "boolean"}
+                            ]
+                        }
+                    },
                     {"name": "cleaned_paths", "type": "array", "items": {"type": "string"}},
                     {
                         "name": "skipped_paths",

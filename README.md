@@ -71,7 +71,8 @@ cacheferret scan --limit 20 --fields kind,path,bytes |
 - Shared stores that can contain or back irreplaceable project state are
   scan-only and remain excluded even with `--include-recent --yes`.
 - `--dry-run` follows the same discovery and eligibility policy without
-  deleting anything.
+  deleting anything, and lists every selected path with its size and restore
+  requirements.
 
 Reclaimed bytes are an estimate based on the freshly measured directory size;
 filesystem free-space deltas can differ because of snapshots, compression,
