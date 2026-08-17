@@ -25,10 +25,9 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # Avoid the intermittent "HTTP2 framing layer" curl errors when cargo fetches
   # from crates.io on GitHub-hosted runners.
   CARGO_HTTP_MULTIPLEXING: "false"
@@ -43,12 +42,41 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Verify Cargo.lock is up to date
         run: cargo check --locked
+      - name: Verify tag matches Cargo version
+        if: github.event_name == 'push'
+        run: |
+          PACKAGE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "v${PACKAGE_VERSION}" = "${GITHUB_REF_NAME}"
       - name: Run tests
         run: make test
+      - name: Verify publishable package
+        run: cargo package --locked
+
+  release-assets:
+    name: Generate release support files
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate shell completions
+        run: |
+          cargo build --release --locked
+          mkdir -p support/completions
+          ./target/release/cacheferret completions bash > support/completions/cacheferret.bash
+          ./target/release/cacheferret completions zsh > support/completions/_cacheferret
+          ./target/release/cacheferret completions fish > support/completions/cacheferret.fish
+          ./target/release/cacheferret completions powershell > support/completions/cacheferret.ps1
+          ./target/release/cacheferret completions elvish > support/completions/cacheferret.elv
+          cp README.md LICENSE CHANGELOG.md support/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: support-files
+          path: support
 
   build:
     name: Build ${{ matrix.target }}
-    needs: test
+    needs: [test, release-assets]
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -73,23 +101,28 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Verify binary
         # Skip for cross-compiled targets the runner cannot execute.
         if: ${{ !matrix.cross }}
         run: ./target/${{ matrix.target }}/release/cacheferret --version
 
-      - name: Create release archive
+      - name: Stage release binary
         shell: bash
         run: |
-          # GITHUB_REF_NAME is the tag on a release (v1.2.3) and the branch on
-          # a workflow_dispatch dry run (main); both are free of slashes.
-          VERSION="${GITHUB_REF_NAME}"
-          ARCHIVE_NAME="cacheferret-${VERSION}-${{ matrix.target }}"
           mkdir -p release-package
           cp "target/${{ matrix.target }}/release/cacheferret" release-package/cacheferret
-          tar -czf "${ARCHIVE_NAME}.tar.gz" -C release-package cacheferret
+      - uses: actions/download-artifact@v4
+        with:
+          name: support-files
+          path: release-package
+      - name: Pack and checksum release archive
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          ARCHIVE_NAME="cacheferret-${VERSION}-${{ matrix.target }}"
+          tar -czf "${ARCHIVE_NAME}.tar.gz" -C release-package cacheferret README.md LICENSE CHANGELOG.md completions
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
           else
@@ -133,6 +166,8 @@ jobs:
     needs: build
     if: ${{ inputs.dry_run != true }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download release archives
         uses: actions/download-artifact@v4
@@ -153,6 +188,7 @@ jobs:
     if: ${{ inputs.dry_run != true }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Download release archives
         uses: actions/download-artifact@v4
         with:
@@ -168,61 +204,29 @@ jobs:
             echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
           done
 
+      - uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+
+      - name: Trust GitHub's SSH host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
       - name: Update Homebrew formula
-        env:
-          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION_NUM="${VERSION#v}"
-
-          cat > /tmp/cacheferret.rb << 'FORMULA'
-          class Cacheferret < Formula
-            desc "Find and safely clean developer caches across macOS and Linux"
-            homepage "https://github.com/rvben/cacheferret"
-            version "VERSION_NUM"
-            license "MIT"
-
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/rvben/cacheferret/releases/download/VERSION/cacheferret-VERSION-aarch64-apple-darwin.tar.gz"
-                sha256 "SHA_AARCH64_APPLE_DARWIN"
-              else
-                url "https://github.com/rvben/cacheferret/releases/download/VERSION/cacheferret-VERSION-x86_64-apple-darwin.tar.gz"
-                sha256 "SHA_X86_64_APPLE_DARWIN"
-              end
-            end
-
-            on_linux do
-              if Hardware::CPU.arm?
-                url "https://github.com/rvben/cacheferret/releases/download/VERSION/cacheferret-VERSION-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "SHA_AARCH64_UNKNOWN_LINUX_GNU"
-              else
-                url "https://github.com/rvben/cacheferret/releases/download/VERSION/cacheferret-VERSION-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "SHA_X86_64_UNKNOWN_LINUX_GNU"
-              end
-            end
-
-            def install
-              bin.install "cacheferret"
-            end
-
-            test do
-              system "#{bin}/cacheferret", "--version"
-            end
-          end
-          FORMULA
-
-          sed -i "s/VERSION_NUM/${VERSION_NUM}/g" /tmp/cacheferret.rb
-          sed -i "s/VERSION/${VERSION}/g" /tmp/cacheferret.rb
-          sed -i "s/SHA_AARCH64_APPLE_DARWIN/${{ steps.hashes.outputs.aarch64_apple_darwin }}/g" /tmp/cacheferret.rb
-          sed -i "s/SHA_X86_64_APPLE_DARWIN/${{ steps.hashes.outputs.x86_64_apple_darwin }}/g" /tmp/cacheferret.rb
-          sed -i "s/SHA_AARCH64_UNKNOWN_LINUX_GNU/${{ steps.hashes.outputs.aarch64_unknown_linux_gnu }}/g" /tmp/cacheferret.rb
-          sed -i "s/SHA_X86_64_UNKNOWN_LINUX_GNU/${{ steps.hashes.outputs.x86_64_unknown_linux_gnu }}/g" /tmp/cacheferret.rb
-
-          mkdir -p ~/.ssh
-          echo "$HOMEBREW_TAP_DEPLOY_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          scripts/render-homebrew-formula.sh \
+            packaging/homebrew/cacheferret.rb.in \
+            /tmp/cacheferret.rb \
+            "$VERSION" \
+            "$VERSION_NUM" \
+            "${{ steps.hashes.outputs.aarch64_apple_darwin }}" \
+            "${{ steps.hashes.outputs.x86_64_apple_darwin }}" \
+            "${{ steps.hashes.outputs.aarch64_unknown_linux_gnu }}" \
+            "${{ steps.hashes.outputs.x86_64_unknown_linux_gnu }}"
+          ruby -c /tmp/cacheferret.rb
 
           git clone git@github.com:rvben/homebrew-tap.git /tmp/tap
           mkdir -p /tmp/tap/Formula

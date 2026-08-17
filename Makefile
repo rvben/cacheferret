@@ -1,4 +1,4 @@
-.PHONY: build release test lint fmt check conformance clean install release-patch release-minor release-major update-deps
+.PHONY: build release test lint fmt check conformance packaging-check clean install release-patch release-minor release-major update-deps
 
 build:
 	cargo build
@@ -16,11 +16,14 @@ lint:
 fmt:
 	cargo fmt
 
-check: lint test
+check: lint test packaging-check
 
 # Score the binary against The CLI Spec (clispec.dev). Requires `clispec`.
 conformance: release
 	clispec score ./target/release/cacheferret catalog
+
+packaging-check:
+	scripts/test-homebrew-formula.sh
 
 clean:
 	cargo clean

@@ -21,6 +21,8 @@ jobs:
           components: rustfmt, clippy
       - name: Run linting
         run: make lint
+      - name: Verify packaging assets
+        run: make packaging-check
 
   test:
     name: Test (${{ matrix.os }})
