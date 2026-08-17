@@ -1,38 +1,33 @@
-//! cacheferret: Find and safely clean developer caches across macOS and Linux
-//!
-//! The whole pipeline is reachable through [`run`], which the CLI and the tests
-//! both use. Replace the example logic with your own.
+//! CacheFerret finds and safely removes rebuildable developer caches.
 
+mod catalog;
+mod cleaner;
 mod error;
+mod model;
+mod scanner;
 pub mod schema;
 
+pub use catalog::{catalog, default_roots};
+pub use cleaner::clean_candidates;
 pub use error::Error;
+pub use model::{
+    CacheCandidate, CacheScope, CatalogEntry, CleanReport, DiscoveryOptions, OutputFormat,
+    ScanReport, ScopeFilter,
+};
+pub use scanner::discover;
 
-/// Rendered output format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
-    Text,
-    Json,
-}
-
-/// A complete request. Grow this with your own fields.
-#[derive(Debug, Clone)]
-pub struct Request {
-    pub value: String,
-    pub format: OutputFormat,
-}
-
-/// Run the command and return the rendered output (no trailing newline).
-///
-/// Example logic: parse `value` as an integer and double it. Replace this.
-pub fn run(req: &Request) -> Result<String, Error> {
-    let value: i64 = req.value.parse().map_err(|_| Error::InvalidInput {
-        input: req.value.clone(),
-    })?;
-    let doubled = value.saturating_mul(2);
-
-    Ok(match req.format {
-        OutputFormat::Json => serde_json::json!({ "value": value, "doubled": doubled }).to_string(),
-        OutputFormat::Text => format!("{value} doubled is {doubled}"),
-    })
+/// Render a byte count compactly for terminal output.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }

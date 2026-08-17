@@ -1,8 +1,8 @@
-//! End-to-end tests of the compiled binary: the clispec contract, the example
-//! command, and the error/exit-code envelope. Replace these as you replace the
-//! example logic.
-
+use std::fs;
+use std::path::Path;
 use std::process::Command;
+
+use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_cacheferret");
 
@@ -27,40 +27,121 @@ fn error_envelope(stderr: &str) -> serde_json::Value {
         .clone()
 }
 
-#[test]
-fn schema_is_clispec_v0_2() {
-    let out = run(&["schema"]);
-    assert_eq!(out.code, 0);
-    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    assert_eq!(v["clispec"], "0.2");
+fn cargo_fixture() -> (TempDir, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("demo");
+    fs::create_dir_all(project.join("target/debug")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname='demo'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    fs::write(project.join("target/debug/app"), [7_u8; 64]).unwrap();
+    let root = temp.path().to_string_lossy().into_owned();
+    (temp, root)
 }
 
 #[test]
-fn help_mentions_schema() {
+fn schema_is_clispec_v0_3() {
+    let out = run(&["schema"]);
+    assert_eq!(out.code, 0);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["clispec"], "0.3");
+    assert_eq!(value["output"]["piped"], "json");
+}
+
+#[test]
+fn schema_can_be_narrowed_to_a_command() {
+    let out = run(&["schema", "clean"]);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(value["commands"][0]["name"], "clean");
+}
+
+#[test]
+fn help_mentions_schema_and_safe_default() {
     let out = run(&["--help"]);
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("schema"));
+    assert!(out.stdout.contains("without a command scans only"));
 }
 
 #[test]
-fn run_doubles_the_value() {
-    let out = run(&["21"]);
+fn scan_emits_paginated_json_when_piped() {
+    let (_temp, root) = cargo_fixture();
+    let out = run(&[
+        "scan",
+        "--root",
+        &root,
+        "--scope",
+        "project",
+        "--protect-days",
+        "0",
+        "--limit",
+        "10",
+    ]);
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    assert_eq!(v["value"], 21);
-    assert_eq!(v["doubled"], 42);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["items"][0]["kind"], "cargo-target");
+    assert_eq!(value["items"][0]["bytes"], 64);
+    assert_eq!(value["truncated"], false);
 }
 
 #[test]
-fn invalid_input_exits_1() {
-    let out = run(&["abc"]);
-    assert_eq!(out.code, 1);
+fn fields_projects_candidate_records() {
+    let (_temp, root) = cargo_fixture();
+    let out = run(&[
+        "scan",
+        "--root",
+        &root,
+        "--scope",
+        "project",
+        "--fields",
+        "kind,bytes",
+    ]);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let item = value["items"][0].as_object().unwrap();
+    assert_eq!(item.len(), 2);
+    assert!(item.contains_key("kind"));
+    assert!(item.contains_key("bytes"));
+}
+
+#[test]
+fn clean_refuses_without_tty_or_yes() {
+    let (_temp, root) = cargo_fixture();
+    let out = run(&["clean", "--root", &root, "--protect-days", "0"]);
+    assert_eq!(out.code, 6);
+    assert_eq!(error_envelope(&out.stderr)["kind"], "confirmation_required");
+    assert!(Path::new(&root).join("demo/target").exists());
+}
+
+#[test]
+fn dry_run_reports_without_deleting() {
+    let (_temp, root) = cargo_fixture();
+    let out = run(&["clean", "--root", &root, "--protect-days", "0", "--dry-run"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["dry_run"], true);
+    assert_eq!(value["selected"], 1);
+    assert!(Path::new(&root).join("demo/target").exists());
+}
+
+#[test]
+fn confirmed_clean_removes_only_cache() {
+    let (_temp, root) = cargo_fixture();
+    let out = run(&["clean", "--root", &root, "--protect-days", "0", "--yes"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["changed"], true);
+    assert_eq!(value["cleaned"], 1);
+    assert!(!Path::new(&root).join("demo/target").exists());
+    assert!(Path::new(&root).join("demo/Cargo.toml").exists());
+}
+
+#[test]
+fn invalid_kind_has_declared_error() {
+    let out = run(&["scan", "--scope", "global", "--kind", "imaginary"]);
+    assert_eq!(out.code, 2);
     assert_eq!(error_envelope(&out.stderr)["kind"], "invalid_input");
-}
-
-#[test]
-fn no_value_exits_3() {
-    let out = run(&[]);
-    assert_eq!(out.code, 3);
-    assert_eq!(error_envelope(&out.stderr)["kind"], "usage");
 }

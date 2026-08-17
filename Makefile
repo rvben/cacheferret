@@ -20,7 +20,7 @@ check: lint test
 
 # Score the binary against The CLI Spec (clispec.dev). Requires `clispec`.
 conformance: release
-	clispec score ./target/release/cacheferret
+	clispec score ./target/release/cacheferret catalog
 
 clean:
 	cargo clean

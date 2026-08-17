@@ -1,24 +1,20 @@
-//! The clispec v0.2 contract emitted by `cacheferret schema`.
-//!
-//! Conforms to <https://clispec.dev/schema/v0.2.json> (validated by a test
-//! against the vendored copy in `schemas/clispec-v0.2.json`). Keep this in sync
-//! as you add commands, arguments, and error kinds.
+//! The clispec.dev v0.3 contract emitted by `cacheferret schema`.
 
 use serde_json::{Value, json};
 
-/// The version of The CLI Spec this document conforms to.
-pub const CLISPEC_VERSION: &str = "0.2";
+pub const CLISPEC_VERSION: &str = "0.3";
 
-/// Build the clispec contract as a JSON value.
 pub fn contract() -> Value {
     json!({
         "clispec": CLISPEC_VERSION,
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
         "description": env!("CARGO_PKG_DESCRIPTION"),
+        "output": {"tty": "text", "piped": "json"},
         "global_args": [
             {
                 "name": "--output",
+                "short": "-o",
                 "type": "string",
                 "enum": ["auto", "json", "text"],
                 "default": "auto",
@@ -27,42 +23,177 @@ pub fn contract() -> Value {
         ],
         "commands": [
             {
-                "name": "run",
-                "description": "Double an integer. The default command, invoked as `cacheferret <value>`. Replace this with your own logic.",
-                "mutating": false,
+                "name": "scan",
+                "description": "Find and size developer caches without changing anything. Also runs when no command is given.",
+                "effects": "read_only",
+                "cardinality": "unbounded",
+                "pagination": {
+                    "style": "offset",
+                    "offset_arg": "--offset",
+                    "limit_arg": "--limit"
+                },
+                "fields_arg": "--fields",
+                "args": discovery_args("all", true),
+                "output_fields": candidate_fields(),
+                "errors": ["invalid_input", "io"],
                 "stability": "stable",
-                "args": [
-                    {"name": "value", "type": "integer", "required": true, "description": "The integer to double."}
-                ],
+                "example": {"args": ["scan", "--scope", "project", "--root", ".", "--limit", "10"]}
+            },
+            {
+                "name": "clean",
+                "description": "Remove eligible caches after final validation and explicit confirmation.",
+                "effects": "idempotent",
+                "cardinality": "single",
+                "confirmation_bypass_arg": "--yes",
+                "fields_arg": "--fields",
+                "args": clean_args(),
                 "output_fields": [
-                    {"name": "value", "type": "integer"},
-                    {"name": "doubled", "type": "integer"}
-                ]
+                    {"name": "changed", "type": "boolean"},
+                    {"name": "dry_run", "type": "boolean"},
+                    {"name": "confirmed", "type": "boolean"},
+                    {"name": "selected", "type": "integer"},
+                    {"name": "cleaned", "type": "integer"},
+                    {"name": "skipped", "type": "integer"},
+                    {"name": "protected_skipped", "type": "integer"},
+                    {"name": "policy_skipped", "type": "integer"},
+                    {"name": "network_restore_selected", "type": "integer"},
+                    {"name": "bytes_selected", "type": "integer"},
+                    {"name": "bytes_reclaimed_estimate", "type": "integer"},
+                    {"name": "cleaned_paths", "type": "array", "items": {"type": "string"}},
+                    {
+                        "name": "skipped_paths",
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "fields": [
+                                {"name": "path", "type": "string"},
+                                {"name": "reason", "type": "string"}
+                            ]
+                        }
+                    }
+                ],
+                "errors": ["invalid_input", "confirmation_required", "conflict", "io"],
+                "stability": "stable",
+                "example": {"args": ["clean", "--root", ".", "--dry-run"]}
+            },
+            {
+                "name": "catalog",
+                "description": "List the closed safety catalog of supported cache kinds.",
+                "effects": "read_only",
+                "cardinality": "bounded",
+                "output_fields": [
+                    {"name": "kind", "type": "string"},
+                    {"name": "ecosystem", "type": "string"},
+                    {"name": "scope", "type": "string", "enum": ["project", "global"]},
+                    {"name": "description", "type": "string"},
+                    {"name": "network_restore", "type": "boolean"},
+                    {"name": "cleanable", "type": "boolean"}
+                ],
+                "stability": "stable",
+                "example": {"args": ["catalog"]}
             },
             {
                 "name": "schema",
-                "description": "Print this clispec contract as JSON.",
-                "mutating": false,
+                "description": "Print this clispec.dev v0.3 contract as JSON.",
+                "effects": "read_only",
+                "cardinality": "single",
+                "args": [
+                    {"name": "path", "type": "string[]", "required": false, "description": "Optional command path used to narrow the contract."}
+                ],
+                "stdout_schema": {"$ref": "https://clispec.dev/schema/v0.3.json"},
                 "stability": "stable"
             },
             {
                 "name": "completions",
                 "description": "Generate a shell completion script.",
-                "mutating": false,
-                "stability": "stable",
+                "effects": "read_only",
+                "output_kind": "opaque",
+                "media_type": "text/x-shellscript",
                 "args": [
                     {"name": "shell", "type": "string", "required": true, "enum": ["bash", "zsh", "fish", "powershell", "elvish"], "description": "Target shell."}
-                ]
+                ],
+                "stability": "stable"
             }
         ],
         "errors": [
-            {"kind": "usage", "exit_code": 3, "retryable": false, "description": "Invalid command-line arguments."},
-            {"kind": "invalid_input", "exit_code": 1, "retryable": false, "description": "The argument was not an integer."}
-        ]
+            {"kind": "invalid_input", "exit_code": 2, "retryable": false, "description": "A path, kind, field, or value was invalid."},
+            {"kind": "usage", "exit_code": 3, "retryable": false, "description": "The command-line invocation was invalid."},
+            {"kind": "io", "exit_code": 4, "retryable": false, "description": "A local filesystem or process operation failed."},
+            {"kind": "conflict", "exit_code": 5, "retryable": false, "description": "Every selected target changed or became unsafe before deletion."},
+            {"kind": "confirmation_required", "exit_code": 6, "retryable": false, "description": "Cleanup reached a confirmation gate without a TTY."}
+        ],
+        "extensions": {
+            "homepage": env!("CARGO_PKG_HOMEPAGE"),
+            "safety": {
+                "follows_symlinks": false,
+                "default_protect_days": 7,
+                "default_clean_scope": "project"
+            }
+        }
     })
 }
 
-/// The contract as a pretty-printed JSON string.
-pub fn contract_json() -> String {
-    serde_json::to_string_pretty(&contract()).expect("contract serializes")
+pub fn contract_for(path: &[String]) -> Value {
+    let mut value = contract();
+    if path.is_empty() {
+        return value;
+    }
+    let query = path.join(" ");
+    let prefix = format!("{query} ");
+    if let Some(commands) = value.get_mut("commands").and_then(Value::as_array_mut) {
+        commands.retain(|command| {
+            command
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name == query || name.starts_with(&prefix))
+        });
+    }
+    value
+}
+
+pub fn contract_json(path: &[String]) -> String {
+    serde_json::to_string_pretty(&contract_for(path)).expect("contract serializes")
+}
+
+fn discovery_args(default_scope: &str, paging: bool) -> Vec<Value> {
+    let mut args = vec![
+        json!({"name": "--root", "type": "path[]", "required": false, "description": "Project directory to scan. Repeat for multiple roots; defaults to common source directories."}),
+        json!({"name": "--scope", "type": "string", "enum": ["all", "project", "global"], "default": default_scope, "description": "Cache locations to include."}),
+        json!({"name": "--kind", "type": "string[]", "required": false, "description": "Restrict to kinds returned by `cacheferret catalog`."}),
+        json!({"name": "--protect-days", "type": "integer", "default": 7, "description": "Consider caches modified within this many days protected."}),
+    ];
+    if paging {
+        args.extend([
+            json!({"name": "--limit", "type": "integer", "default": 100, "description": "Maximum records in this page (1-1000)."}),
+            json!({"name": "--offset", "type": "integer", "default": 0, "description": "Zero-based record offset."}),
+            json!({"name": "--fields", "type": "string[]", "required": false, "description": "Candidate fields to include."}),
+        ]);
+    }
+    args
+}
+
+fn clean_args() -> Vec<Value> {
+    let mut args = discovery_args("project", false);
+    args.extend([
+        json!({"name": "--include-recent", "type": "boolean", "default": false, "description": "Include recently modified caches protected by default."}),
+        json!({"name": "--dry-run", "type": "boolean", "default": false, "description": "Report what would be removed without changing the filesystem."}),
+        json!({"name": "--yes", "short": "-y", "type": "boolean", "default": false, "description": "Confirm cleanup non-interactively."}),
+        json!({"name": "--fields", "type": "string[]", "required": false, "description": "Report fields to include in structured output."}),
+    ]);
+    args
+}
+
+fn candidate_fields() -> Vec<Value> {
+    vec![
+        json!({"name": "kind", "type": "string"}),
+        json!({"name": "ecosystem", "type": "string"}),
+        json!({"name": "scope", "type": "string", "enum": ["project", "global"]}),
+        json!({"name": "path", "type": "string"}),
+        json!({"name": "bytes", "type": "integer"}),
+        json!({"name": "modified_unix", "type": "integer", "nullable": true}),
+        json!({"name": "age_days", "type": "integer", "nullable": true}),
+        json!({"name": "protected", "type": "boolean"}),
+        json!({"name": "network_restore", "type": "boolean"}),
+        json!({"name": "cleanable", "type": "boolean"}),
+    ]
 }
