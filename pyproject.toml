@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "cacheferret"
+dynamic = ["version"]
+description = "Find and safely clean developer caches across macOS and Linux"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "Ruben J. Jongejan", email = "ruben.jongejan@gmail.com" }]
+keywords = ["cache", "cleanup", "developer-tools", "disk-space", "cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Environment :: Console :: Curses",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Rust",
+  "Topic :: System :: Filesystems",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/rvben/cacheferret"
+Repository = "https://github.com/rvben/cacheferret"
+Issues = "https://github.com/rvben/cacheferret/issues"
+
+[tool.maturin]
+bindings = "bin"
+locked = true
+strip = true

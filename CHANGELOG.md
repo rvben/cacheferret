@@ -6,6 +6,25 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-18
+
+### Added
+
+- A responsive, keyboard-first TUI with background scanning, filtering, sorting,
+  scope views, detailed cache inspection, direct `d`-key deletion, and compact
+  confirmation for risky targets.
+- Adaptive truecolor, 256-color, no-color, ASCII, and reduced-motion terminal
+  modes, with rendering regressions and PTY lifecycle coverage on macOS and Linux.
+- Native PyPI wheels, so the same executable can be installed with
+  `pipx install cacheferret`.
+
+### Changed
+
+- Cache size and activity are remeasured in the background whenever `d` is
+  pressed, so confirmation decisions use current filesystem state.
+- Ratatui and Crossterm were upgraded to their current release lines, removing
+  the obsolete `paste` dependency and updating `lru` beyond its audited releases.
+
 ## [0.1.0] - 2026-08-17
 
 ### Added
@@ -20,5 +39,6 @@ All notable changes to CacheFerret are documented here. The format follows
 - Structured JSON, stable errors, shell completions, and clispec.dev v0.3 introspection.
 - Release archives for Intel and ARM macOS and Linux, plus Homebrew automation.
 
-[Unreleased]: https://github.com/rvben/cacheferret/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rvben/cacheferret/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rvben/cacheferret/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rvben/cacheferret/releases/tag/v0.1.0

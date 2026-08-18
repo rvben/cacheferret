@@ -9,10 +9,11 @@
 [![clispec](https://img.shields.io/badge/clispec-v0.3-3b82f6)](https://clispec.dev)
 
 CacheFerret finds rebuildable developer caches across macOS and Linux, shows
-where the disk space went, and removes only explicitly selected, revalidated
-targets.
+where the disk space went, and removes the caches you choose. Run it in a
+terminal for a fast, keyboard-first workspace; pipe it for structured JSON.
 
-Running `cacheferret` without a command is always read-only.
+Opening the TUI starts with a scan. Focus a cache and press `d` to delete it;
+recent, large, shared, unknown-age, and download-backed caches ask first.
 
 ## Install
 
@@ -22,6 +23,9 @@ brew install rvben/tap/cacheferret
 
 # Cargo
 cargo install cacheferret
+
+# PyPI / pipx
+pipx install cacheferret
 ```
 
 Release archives include checksums, documentation, and completions for Bash,
@@ -30,10 +34,13 @@ Zsh, Fish, PowerShell, and Elvish on Intel and ARM Linux and macOS.
 ## Quick start
 
 ```sh
-# Scan common source roots plus shared caches
+# Open the interactive cache workspace
 cacheferret
 
-# Scan one source tree
+# Open the workspace for one source tree
+cacheferret tui --root ~/Projects --scope project
+
+# Produce plain or structured scan output without opening the TUI
 cacheferret scan --root ~/Projects --scope project
 
 # Preview old project caches that are eligible for cleanup
@@ -50,6 +57,16 @@ cacheferret clean --scope global --include-recent --dry-run
 cacheferret clean --scope global --include-recent --yes
 ```
 
+Inside the TUI, use the arrow keys or `j`/`k` to move, `d` to delete the focused
+cache, `/` to filter, and `Tab` to cycle scopes. Risky deletes use a compact
+`y`/`n` prompt. Press `?` for the complete shortcut guide. Catalog entries
+marked scan-only cannot be deleted.
+
+CacheFerret adapts automatically to truecolor, 256-color, basic ANSI, no-color, and
+non-UTF-8 terminals. Set `NO_COLOR=1` for an uncolored interface,
+`CACHEFERRET_ASCII=1` for ASCII-only glyphs, or
+`CACHEFERRET_REDUCE_MOTION=1` for static progress indicators.
+
 Output is human-readable on a terminal and JSON when piped:
 
 ```sh
@@ -59,11 +76,16 @@ cacheferret scan --limit 20 --fields kind,path,bytes |
 
 ## Safety model
 
-- Bare `cacheferret` and `cacheferret scan` never mutate the filesystem.
+- Bare `cacheferret` opens the TUI on a terminal and emits a read-only JSON scan
+  when piped. `cacheferret scan` never mutates the filesystem.
+- The TUI uses focused-item deletion: move to a cache and press `d`. It confirms
+  recent, large, shared, unknown-age, and download-backed caches.
+- Pressing `d` remeasures the focused cache before deciding whether confirmation
+  is required; confirming triggers another identity and ownership check.
 - `clean` defaults to project caches; shared global caches require an explicit
   `--scope global` or `--scope all`.
-- Caches modified in the last seven days are protected unless
-  `--include-recent` is passed. Change the window with `--protect-days`.
+- The batch `clean` command protects caches modified in the last seven days
+  unless `--include-recent` is passed. Change the window with `--protect-days`.
 - A non-interactive clean refuses to run without `--yes` and exits with the
   declared `confirmation_required` error.
 - Cache roots must match a closed catalog and their project ownership markers.
@@ -115,10 +137,11 @@ libraries may link packages from it.
 
 | command | behavior |
 | --- | --- |
-| `cacheferret` | Scan using safe defaults |
+| `cacheferret` | Open the TUI on a terminal; scan as JSON when piped |
+| `cacheferret tui` | Open the interactive browser with optional discovery filters |
 | `cacheferret scan` | Scan with root, scope, kind, pagination, and field controls |
 | `cacheferret clean` | Preview or clean eligible caches |
-| `cacheferret catalog` | List supported cache kinds and restore costs |
+| `cacheferret catalog` | List supported cache kinds with pagination and field controls |
 | `cacheferret schema [path]` | Print or narrow the clispec.dev v0.3 contract |
 | `cacheferret completions <shell>` | Generate shell completions |
 

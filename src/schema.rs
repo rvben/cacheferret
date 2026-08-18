@@ -23,9 +23,22 @@ pub fn contract() -> Value {
         ],
         "commands": [
             {
+                "name": "tui",
+                "description": "Browse caches and press d to delete the focused entry.",
+                "effects": "idempotent",
+                "mutating": true,
+                "args": tui_args(),
+                "output_kind": "opaque",
+                "media_type": "application/x-terminal",
+                "errors": ["invalid_input", "io"],
+                "stability": "stable",
+                "example": {"args": ["tui", "--root", ".", "--scope", "project"]}
+            },
+            {
                 "name": "scan",
-                "description": "Find and size developer caches without changing anything. Also runs when no command is given.",
+                "description": "Find and size developer caches without changing anything. Also runs when no command is given outside an interactive terminal.",
                 "effects": "read_only",
+                "mutating": false,
                 "cardinality": "unbounded",
                 "pagination": {
                     "style": "offset",
@@ -43,6 +56,7 @@ pub fn contract() -> Value {
                 "name": "clean",
                 "description": "Remove eligible caches after final validation and explicit confirmation.",
                 "effects": "idempotent",
+                "mutating": true,
                 "cardinality": "single",
                 "confirmation_bypass_arg": "--yes",
                 "fields_arg": "--fields",
@@ -93,7 +107,15 @@ pub fn contract() -> Value {
                 "name": "catalog",
                 "description": "List the closed safety catalog of supported cache kinds.",
                 "effects": "read_only",
-                "cardinality": "bounded",
+                "mutating": false,
+                "cardinality": "unbounded",
+                "pagination": {
+                    "style": "offset",
+                    "offset_arg": "--offset",
+                    "limit_arg": "--limit"
+                },
+                "fields_arg": "--fields",
+                "args": catalog_args(),
                 "output_fields": [
                     {"name": "kind", "type": "string"},
                     {"name": "ecosystem", "type": "string"},
@@ -109,6 +131,7 @@ pub fn contract() -> Value {
                 "name": "schema",
                 "description": "Print this clispec.dev v0.3 contract as JSON.",
                 "effects": "read_only",
+                "mutating": false,
                 "cardinality": "single",
                 "args": [
                     {"name": "path", "type": "string[]", "required": false, "description": "Optional command path used to narrow the contract."}
@@ -120,6 +143,7 @@ pub fn contract() -> Value {
                 "name": "completions",
                 "description": "Generate a shell completion script.",
                 "effects": "read_only",
+                "mutating": false,
                 "output_kind": "opaque",
                 "media_type": "text/x-shellscript",
                 "args": [
@@ -185,6 +209,12 @@ fn discovery_args(default_scope: &str, paging: bool) -> Vec<Value> {
     args
 }
 
+fn tui_args() -> Vec<Value> {
+    let mut args = discovery_args("all", false);
+    args.retain(|arg| arg["name"] != "--protect-days");
+    args
+}
+
 fn clean_args() -> Vec<Value> {
     let mut args = discovery_args("project", false);
     args.extend([
@@ -194,6 +224,14 @@ fn clean_args() -> Vec<Value> {
         json!({"name": "--fields", "type": "string[]", "required": false, "description": "Report fields to include in structured output."}),
     ]);
     args
+}
+
+fn catalog_args() -> Vec<Value> {
+    vec![
+        json!({"name": "--limit", "type": "integer", "default": 100, "description": "Maximum records in this page (1-1000)."}),
+        json!({"name": "--offset", "type": "integer", "default": 0, "description": "Zero-based record offset."}),
+        json!({"name": "--fields", "type": "string[]", "required": false, "description": "Catalog fields to include."}),
+    ]
 }
 
 fn candidate_fields() -> Vec<Value> {

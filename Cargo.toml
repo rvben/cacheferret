@@ -1,6 +1,6 @@
 [package]
 name = "cacheferret"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Find and safely clean developer caches across macOS and Linux"
@@ -23,7 +23,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+crossterm = "0.29"
 rayon = "1"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -31,6 +33,7 @@ walkdir = "2"
 
 [dev-dependencies]
 jsonschema = { version = "0.46", default-features = false }
+portable-pty = "0.9"
 tempfile = "3"
 
 [profile.release]

@@ -1,5 +1,7 @@
 //! CacheFerret finds and safely removes rebuildable developer caches.
 
+#![recursion_limit = "256"]
+
 mod catalog;
 mod cleaner;
 mod error;
@@ -14,7 +16,7 @@ pub use model::{
     CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveryOptions,
     OutputFormat, ScanReport, ScopeFilter,
 };
-pub use scanner::discover;
+pub use scanner::{discover, refresh_candidate};
 
 /// Render a byte count compactly for terminal output.
 pub fn format_bytes(bytes: u64) -> String {

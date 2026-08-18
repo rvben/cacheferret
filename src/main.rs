@@ -1,5 +1,7 @@
 //! CacheFerret command-line interface.
 
+mod tui;
+
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -18,7 +20,7 @@ use serde_json::{Map, Value, json};
     name = "cacheferret",
     version,
     about = "Find and safely clean developer caches across macOS and Linux",
-    long_about = "Find and safely clean developer caches across macOS and Linux.\n\nRunning without a command scans only. Run `cacheferret schema` for the machine-readable clispec.dev v0.3 contract."
+    long_about = "Find and safely clean developer caches across macOS and Linux.\n\nRunning without a command opens the TUI on a terminal and performs a read-only JSON scan when piped. Run `cacheferret schema` for the machine-readable clispec.dev v0.3 contract."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,12 +33,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Browse caches and press `d` to delete the focused entry.
+    Tui(TuiArgs),
     /// Find and size developer caches without changing anything.
     Scan(ScanArgs),
     /// Safely remove eligible caches after confirmation.
     Clean(CleanArgs),
     /// List every cache kind CacheFerret knows how to identify.
-    Catalog,
+    Catalog(CatalogArgs),
     /// Print the machine-readable clispec.dev v0.3 contract.
     Schema {
         /// Optional command path used to narrow the contract.
@@ -47,6 +51,46 @@ enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Debug, Clone, Args)]
+struct TuiArgs {
+    /// Project directory to scan. Repeat for multiple roots.
+    #[arg(long = "root", value_name = "PATH")]
+    roots: Vec<PathBuf>,
+
+    /// Include project caches, shared global caches, or both.
+    #[arg(long, value_enum, default_value = "all")]
+    scope: CliScope,
+
+    /// Restrict discovery to a cache kind from `cacheferret catalog`.
+    #[arg(long = "kind", value_name = "KIND")]
+    kinds: Vec<String>,
+}
+
+impl Default for TuiArgs {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            scope: CliScope::All,
+            kinds: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+struct CatalogArgs {
+    /// Maximum records returned in this page.
+    #[arg(long, default_value_t = 100, value_parser = parse_limit)]
+    limit: usize,
+
+    /// Zero-based record offset.
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
+
+    /// Catalog fields to include. Comma-separated or repeatable.
+    #[arg(long, value_delimiter = ',', value_name = "FIELD")]
+    fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -146,7 +190,7 @@ impl From<CliScope> for ScopeFilter {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliOutput {
     Auto,
     Json,
@@ -173,6 +217,7 @@ fn main() -> ExitCode {
     let format = cli.output.resolve();
 
     let result = match cli.command {
+        Some(Command::Tui(args)) => return run_tui(args, cli.output),
         Some(Command::Schema { path }) => {
             println!("{}", schema::contract_json(&path));
             return ExitCode::SUCCESS;
@@ -183,9 +228,15 @@ fn main() -> ExitCode {
             clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
             return ExitCode::SUCCESS;
         }
-        Some(Command::Catalog) => run_catalog(format),
+        Some(Command::Catalog(args)) => run_catalog(args, format),
         Some(Command::Scan(args)) => run_scan(args, format),
         Some(Command::Clean(args)) => run_clean(args, format),
+        None if cli.output == CliOutput::Auto
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal() =>
+        {
+            return run_tui(TuiArgs::default(), cli.output);
+        }
         None => run_scan(ScanArgs::default(), format),
     };
 
@@ -194,6 +245,34 @@ fn main() -> ExitCode {
             println!("{output}");
             ExitCode::SUCCESS
         }
+        Err(error) => {
+            emit_error(&error, format);
+            ExitCode::from(error.exit_code())
+        }
+    }
+}
+
+fn run_tui(args: TuiArgs, output: CliOutput) -> ExitCode {
+    let format = output.resolve();
+    if output == CliOutput::Json {
+        let error = Error::Usage {
+            message: "the TUI does not produce JSON; use `cacheferret scan --output json`"
+                .to_owned(),
+        };
+        emit_error(&error, format);
+        return ExitCode::from(error.exit_code());
+    }
+    let roots = if args.roots.is_empty() {
+        default_roots()
+    } else {
+        args.roots
+    };
+    match tui::run(tui::Options {
+        roots,
+        scope: args.scope.into(),
+        kinds: args.kinds,
+    }) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             emit_error(&error, format);
             ExitCode::from(error.exit_code())
@@ -248,13 +327,40 @@ fn run_scan(args: ScanArgs, format: OutputFormat) -> Result<String, Error> {
     })
 }
 
-fn run_catalog(format: OutputFormat) -> Result<String, Error> {
+fn run_catalog(args: CatalogArgs, format: OutputFormat) -> Result<String, Error> {
+    validate_field_set(&args.fields, &CATALOG_FIELDS)?;
     let entries = cacheferret::catalog();
+    let total = entries.len();
+    let end = args.offset.saturating_add(args.limit).min(total);
+    let page = if args.offset >= total {
+        &[]
+    } else {
+        &entries[args.offset..end]
+    };
     Ok(match format {
-        OutputFormat::Json => json!({"total": entries.len(), "items": entries}).to_string(),
+        OutputFormat::Json => {
+            let items: Vec<Value> = page
+                .iter()
+                .map(|entry| {
+                    project_object(
+                        serde_json::to_value(entry).expect("catalog entry serializes"),
+                        &args.fields,
+                    )
+                })
+                .collect();
+            json!({
+                "items": items,
+                "total": total,
+                "returned": page.len(),
+                "offset": args.offset,
+                "limit": args.limit,
+                "truncated": end < total,
+            })
+            .to_string()
+        }
         OutputFormat::Text => {
             let mut lines = vec!["KIND\tECOSYSTEM\tSCOPE\tRESTORE\tCLEAN".to_owned()];
-            lines.extend(entries.iter().map(|entry| {
+            lines.extend(page.iter().map(|entry| {
                 format!(
                     "{}\t{}\t{:?}\t{}\t{}",
                     entry.kind,
@@ -487,6 +593,15 @@ const CANDIDATE_FIELDS: [&str; 10] = [
     "modified_unix",
     "age_days",
     "protected",
+    "network_restore",
+    "cleanable",
+];
+
+const CATALOG_FIELDS: [&str; 6] = [
+    "kind",
+    "ecosystem",
+    "scope",
+    "description",
     "network_restore",
     "cleanable",
 ];

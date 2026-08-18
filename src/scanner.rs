@@ -219,6 +219,32 @@ fn measure_tree(root: &Path) -> (u64, Option<u64>) {
     (bytes, latest)
 }
 
+/// Revalidate and remeasure a candidate against the current filesystem state.
+///
+/// Interactive callers use this immediately before deciding whether a delete
+/// needs confirmation. The candidate keeps its original identity and safety
+/// anchor so the final cleanup revalidation still detects replacement or
+/// containment changes.
+pub fn refresh_candidate(
+    candidate: &CacheCandidate,
+    protect_days: u64,
+) -> Result<CacheCandidate, Error> {
+    revalidate(candidate).map_err(|message| Error::Conflict { message })?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let (bytes, modified_unix) = measure_tree(&candidate.path);
+    let age_days = modified_unix.map(|modified| now.saturating_sub(modified) / 86_400);
+
+    let mut refreshed = candidate.clone();
+    refreshed.bytes = bytes;
+    refreshed.modified_unix = modified_unix;
+    refreshed.age_days = age_days;
+    refreshed.protected = age_days.is_none_or(|days| days < protect_days);
+    Ok(refreshed)
+}
+
 #[cfg(unix)]
 fn identity(metadata: &fs::Metadata) -> FileIdentity {
     use std::os::unix::fs::MetadataExt;
@@ -323,6 +349,32 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
+    }
+
+    #[test]
+    fn refresh_candidate_observes_new_files_and_recent_activity() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("demo");
+        let target = project.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+
+        let mut report = discover(&DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 0,
+        })
+        .unwrap();
+        report.candidates[0].age_days = Some(30);
+        report.candidates[0].bytes = 0;
+        fs::write(target.join("new-object"), [7_u8; 128]).unwrap();
+
+        let refreshed = refresh_candidate(&report.candidates[0], 7).unwrap();
+
+        assert_eq!(refreshed.bytes, 128);
+        assert_eq!(refreshed.age_days, Some(0));
+        assert!(refreshed.protected);
     }
 
     #[test]

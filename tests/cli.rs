@@ -63,7 +63,24 @@ fn help_mentions_schema_and_safe_default() {
     let out = run(&["--help"]);
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("schema"));
-    assert!(out.stdout.contains("without a command scans only"));
+    assert!(out.stdout.contains("without a command opens the TUI"));
+    assert!(out.stdout.contains("delete the focused entry"));
+}
+
+#[test]
+fn tui_requires_an_interactive_terminal() {
+    let out = run(&["tui"]);
+    assert_eq!(out.code, 3);
+    assert_eq!(error_envelope(&out.stderr)["kind"], "usage");
+    assert!(out.stderr.contains("needs an interactive terminal"));
+}
+
+#[test]
+fn tui_rejects_explicit_json_output() {
+    let out = run(&["tui", "--output", "json"]);
+    assert_eq!(out.code, 3);
+    assert_eq!(error_envelope(&out.stderr)["kind"], "usage");
+    assert!(out.stderr.contains("does not produce JSON"));
 }
 
 #[test]
@@ -105,6 +122,31 @@ fn fields_projects_candidate_records() {
     assert_eq!(item.len(), 2);
     assert!(item.contains_key("kind"));
     assert!(item.contains_key("bytes"));
+}
+
+#[test]
+fn catalog_is_paginated_and_projectable() {
+    let out = run(&[
+        "catalog",
+        "--limit",
+        "2",
+        "--offset",
+        "1",
+        "--fields",
+        "kind,cleanable",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert!(value["total"].as_u64().unwrap() > 2);
+    assert_eq!(value["returned"], 2);
+    assert_eq!(value["offset"], 1);
+    assert_eq!(value["limit"], 2);
+    assert_eq!(value["truncated"], true);
+    for item in value["items"].as_array().unwrap() {
+        assert_eq!(item.as_object().unwrap().len(), 2);
+        assert!(item.get("kind").is_some());
+        assert!(item.get("cleanable").is_some());
+    }
 }
 
 #[test]
