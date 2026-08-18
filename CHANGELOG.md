@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/rvben/cacheferret/compare/v0.2.0...v0.2.1) - 2026-08-18
+
 ### Added
 
 - Fast TUI batch selection with `Space` to toggle and advance, `a` to toggle all
@@ -48,7 +50,3 @@ All notable changes to CacheFerret are documented here. The format follows
 - Scan-only policy for Maven and renv stores that may hold irreplaceable state.
 - Structured JSON, stable errors, shell completions, and clispec.dev v0.3 introspection.
 - Release archives for Intel and ARM macOS and Linux, plus Homebrew automation.
-
-[Unreleased]: https://github.com/rvben/cacheferret/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/rvben/cacheferret/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/rvben/cacheferret/releases/tag/v0.1.0
