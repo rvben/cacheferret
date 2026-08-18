@@ -12,8 +12,9 @@ CacheFerret finds rebuildable developer caches across macOS and Linux, shows
 where the disk space went, and removes the caches you choose. Run it in a
 terminal for a fast, keyboard-first workspace; pipe it for structured JSON.
 
-Opening the TUI starts with a scan. Focus a cache and press `d` to delete it;
-recent, large, shared, unknown-age, and download-backed caches ask first.
+Opening the TUI starts with a scan. Press `Space` to select caches quickly, then
+`d` to delete the batch; with no selection, `d` deletes the focused cache.
+Recent, large, shared, unknown-age, and download-backed caches ask first.
 
 ## Install
 
@@ -57,10 +58,11 @@ cacheferret clean --scope global --include-recent --dry-run
 cacheferret clean --scope global --include-recent --yes
 ```
 
-Inside the TUI, use the arrow keys or `j`/`k` to move, `d` to delete the focused
-cache, `/` to filter, and `Tab` to cycle scopes. Risky deletes use a compact
-`y`/`n` prompt. Press `?` for the complete shortcut guide. Catalog entries
-marked scan-only cannot be deleted.
+Inside the TUI, use the arrow keys or `j`/`k` to move, `Space` to select and
+advance, `a` to toggle all visible caches, and `d` to delete the selection or
+focused cache. Use `/` to filter and `Tab` to cycle scopes. Risky batches use a
+single compact `y`/`n` prompt. Press `?` for the complete shortcut guide.
+Catalog entries marked scan-only cannot be selected or deleted.
 
 CacheFerret adapts automatically to truecolor, 256-color, basic ANSI, no-color, and
 non-UTF-8 terminals. Set `NO_COLOR=1` for an uncolored interface,
@@ -78,10 +80,11 @@ cacheferret scan --limit 20 --fields kind,path,bytes |
 
 - Bare `cacheferret` opens the TUI on a terminal and emits a read-only JSON scan
   when piped. `cacheferret scan` never mutates the filesystem.
-- The TUI uses focused-item deletion: move to a cache and press `d`. It confirms
-  recent, large, shared, unknown-age, and download-backed caches.
-- Pressing `d` remeasures the focused cache before deciding whether confirmation
-  is required; confirming triggers another identity and ownership check.
+- The TUI supports both focused and batch deletion: press `Space` to build a
+  selection, then `d`; when nothing is selected, `d` acts on the focused cache.
+- Pressing `d` remeasures every target before deciding whether confirmation is
+  required. A risky batch gets one confirmation, and every target receives
+  another identity and ownership check immediately before removal.
 - `clean` defaults to project caches; shared global caches require an explicit
   `--scope global` or `--scope all`.
 - The batch `clean` command protects caches modified in the last seven days

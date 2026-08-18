@@ -36,7 +36,9 @@ Core TUI interactions:
 | Intent | Interaction |
 | --- | --- |
 | Move | Arrow keys or `j`/`k` |
-| Delete focused cache | `d` |
+| Select/unselect and advance | `Space` |
+| Select/unselect all visible caches | `a` |
+| Delete selection, or focused cache | `d` |
 | Confirm a risky delete | `y`; cancel with `n` or `Esc` |
 | Filter | `/` |
 | Cycle all/project/global scope | `Tab` |
@@ -45,13 +47,17 @@ Core TUI interactions:
 | Quit | `q` |
 
 The interface should prioritize the cache list, size, age, scope, ecosystem,
-and a useful focused-item explanation. Background work must remain visible and
+and a useful focused-item explanation. Selection must remain quick: repeated
+`Space` presses build a batch while advancing down the list, and `a` operates
+on the current filtered/scope view. Background work must remain visible and
 must not freeze input. Empty, filtered-empty, scanning, deleting, success,
 conflict, and failure states all deserve intentional copy and layout.
 
 ## Proportional confirmation
 
-Deletion must remain direct. A universal confirmation prompt would undermine
+Deletion must remain direct. With a selection, `d` reviews and deletes the
+batch; without one, it reviews and deletes the focused cache. A universal
+confirmation prompt would undermine
 the product's ncdu/gdu-style workflow, while deleting every target without
 context would make the tool hard to trust. CacheFerret therefore confirms only
 when the freshly reviewed target has one or more risk signals:
@@ -62,7 +68,9 @@ when the freshly reviewed target has one or more risk signals:
 - modification age is unknown; or
 - restoration requires downloading packages again.
 
-The prompt should state the concrete reason and accept a simple `y`/`n` answer.
+The prompt should summarize the batch, state the concrete reasons, and accept a
+simple `y`/`n` answer. It is one confirmation for the operation, not one prompt
+per selected cache.
 Scan-only items remain non-deletable rather than presenting a confirmation that
 cannot make the operation safe.
 
@@ -133,4 +141,3 @@ files.
 - Design Docker cleanup as an explicit integration instead of weakening the
   closed cache catalog.
 - Consider Windows only as a complete platform effort, not just an extra wheel.
-

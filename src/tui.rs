@@ -251,7 +251,7 @@ impl SortOrder {
 enum WorkerMessage {
     Scan(Result<ScanReport, Error>),
     Review {
-        result: Result<CacheCandidate, Error>,
+        result: Result<Vec<CacheCandidate>, Error>,
         confirmed: bool,
     },
     Clean(CleanReport),
@@ -268,10 +268,11 @@ struct App {
     editing_filter: bool,
     view_scope: ViewScope,
     sort: SortOrder,
+    selected: HashSet<PathBuf>,
     show_help: bool,
     scan_started: Instant,
-    pending_delete: Option<CacheCandidate>,
-    deleting: Option<PathBuf>,
+    pending_delete: Vec<CacheCandidate>,
+    deleting: Vec<PathBuf>,
     error: Option<String>,
     toast: Option<(String, Instant)>,
     should_quit: bool,
@@ -295,10 +296,11 @@ impl App {
             editing_filter: false,
             view_scope: ViewScope::All,
             sort: SortOrder::Size,
+            selected: HashSet::new(),
             show_help: false,
             scan_started: Instant::now(),
-            pending_delete: None,
-            deleting: None,
+            pending_delete: Vec::new(),
+            deleting: Vec::new(),
             error: None,
             toast: None,
             should_quit: false,
@@ -360,11 +362,68 @@ impl App {
         };
     }
 
+    fn selected_candidates(&self) -> Vec<CacheCandidate> {
+        self.candidates
+            .iter()
+            .filter(|candidate| self.selected.contains(&candidate.path))
+            .cloned()
+            .collect()
+    }
+
+    fn selected_bytes(&self) -> u64 {
+        self.candidates
+            .iter()
+            .filter(|candidate| self.selected.contains(&candidate.path))
+            .map(|candidate| candidate.bytes)
+            .sum()
+    }
+
+    fn toggle_focused_selection(&mut self) {
+        let Some(index) = self.focused_index() else {
+            return;
+        };
+        let candidate = &self.candidates[index];
+        if !candidate.cleanable {
+            self.toast = Some(("This cache is scan-only".to_owned(), Instant::now()));
+            return;
+        }
+        if !self.selected.remove(&candidate.path) {
+            self.selected.insert(candidate.path.clone());
+        }
+        self.move_cursor(1);
+    }
+
+    fn toggle_visible_selection(&mut self) {
+        let visible: Vec<PathBuf> = self
+            .visible
+            .iter()
+            .map(|index| &self.candidates[*index])
+            .filter(|candidate| candidate.cleanable)
+            .map(|candidate| candidate.path.clone())
+            .collect();
+        if visible.is_empty() {
+            self.toast = Some((
+                "No deletable caches in this view".to_owned(),
+                Instant::now(),
+            ));
+            return;
+        }
+        let all_selected = visible.iter().all(|path| self.selected.contains(path));
+        if all_selected {
+            for path in visible {
+                self.selected.remove(&path);
+            }
+        } else {
+            self.selected.extend(visible);
+        }
+    }
+
     fn begin_scan(&mut self, tx: &Sender<WorkerMessage>) {
         self.phase = Phase::Scanning;
         self.scan_started = Instant::now();
-        self.pending_delete = None;
-        self.deleting = None;
+        self.selected.clear();
+        self.pending_delete.clear();
+        self.deleting.clear();
         self.error = None;
         let options = self.options.clone();
         let tx = tx.clone();
@@ -398,21 +457,23 @@ impl App {
                 self.phase = Phase::Failed;
             }
             WorkerMessage::Review {
-                result: Ok(candidate),
+                result: Ok(candidates),
                 confirmed,
             } => {
-                if let Some(current) = self
-                    .candidates
-                    .iter_mut()
-                    .find(|current| current.path == candidate.path)
-                {
-                    *current = candidate.clone();
+                for candidate in &candidates {
+                    if let Some(current) = self
+                        .candidates
+                        .iter_mut()
+                        .find(|current| current.path == candidate.path)
+                    {
+                        *current = candidate.clone();
+                    }
                 }
                 self.rebuild_visible();
-                if confirmed || risk_reasons(&candidate).is_empty() {
-                    self.delete_candidate(candidate, tx);
+                if confirmed || batch_risk_reasons(&candidates).is_empty() {
+                    self.delete_candidates(candidates, tx);
                 } else {
-                    self.pending_delete = Some(candidate);
+                    self.pending_delete = candidates;
                     self.phase = Phase::Confirming;
                 }
             }
@@ -426,10 +487,11 @@ impl App {
                 ));
             }
             WorkerMessage::Clean(report) => {
-                let cleaned: HashSet<&PathBuf> = report.cleaned_paths.iter().collect();
+                let cleaned: HashSet<PathBuf> = report.cleaned_paths.iter().cloned().collect();
                 self.candidates
                     .retain(|candidate| !cleaned.contains(&candidate.path));
-                self.deleting = None;
+                self.selected.retain(|path| !cleaned.contains(path));
+                self.deleting.clear();
                 self.phase = Phase::Ready;
                 self.toast = Some((cleanup_message(&report), Instant::now()));
                 self.rebuild_visible();
@@ -438,53 +500,70 @@ impl App {
     }
 
     fn begin_delete(&mut self, tx: &Sender<WorkerMessage>) {
-        let Some(index) = self.focused_index() else {
-            return;
+        let candidates = if self.selected.is_empty() {
+            let Some(index) = self.focused_index() else {
+                return;
+            };
+            let candidate = self.candidates[index].clone();
+            if !candidate.cleanable {
+                self.toast = Some(("This cache is scan-only".to_owned(), Instant::now()));
+                return;
+            }
+            vec![candidate]
+        } else {
+            self.selected_candidates()
         };
-        let candidate = self.candidates[index].clone();
-        if !candidate.cleanable {
-            self.toast = Some(("This cache is scan-only".to_owned(), Instant::now()));
-            return;
+        if !candidates.is_empty() {
+            self.review_candidates(candidates, false, tx);
         }
-        self.review_candidate(candidate, false, tx);
     }
 
     fn confirm_delete(&mut self, tx: &Sender<WorkerMessage>) {
-        let Some(candidate) = self.pending_delete.take() else {
+        if self.pending_delete.is_empty() {
             self.phase = Phase::Ready;
             return;
-        };
-        self.review_candidate(candidate, true, tx);
+        }
+        let candidates = std::mem::take(&mut self.pending_delete);
+        self.review_candidates(candidates, true, tx);
     }
 
     fn cancel_delete(&mut self) {
-        self.pending_delete = None;
+        self.pending_delete.clear();
         self.phase = Phase::Ready;
     }
 
-    fn review_candidate(
+    fn review_candidates(
         &mut self,
-        candidate: CacheCandidate,
+        candidates: Vec<CacheCandidate>,
         confirmed: bool,
         tx: &Sender<WorkerMessage>,
     ) {
         self.phase = Phase::Reviewing;
         self.scan_started = Instant::now();
-        self.deleting = Some(candidate.path.clone());
+        self.deleting = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let result = refresh_candidate(&candidate, RECENT_DAYS);
+            let result = candidates
+                .iter()
+                .map(|candidate| refresh_candidate(candidate, RECENT_DAYS))
+                .collect();
             let _ = tx.send(WorkerMessage::Review { result, confirmed });
         });
     }
 
-    fn delete_candidate(&mut self, candidate: CacheCandidate, tx: &Sender<WorkerMessage>) {
+    fn delete_candidates(&mut self, candidates: Vec<CacheCandidate>, tx: &Sender<WorkerMessage>) {
         self.phase = Phase::Cleaning;
         self.scan_started = Instant::now();
-        self.deleting = Some(candidate.path.clone());
+        self.deleting = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(WorkerMessage::Clean(clean_candidates(&[candidate], false)));
+            let _ = tx.send(WorkerMessage::Clean(clean_candidates(&candidates, false)));
         });
     }
 }
@@ -508,14 +587,44 @@ fn risk_reasons(candidate: &CacheCandidate) -> Vec<&'static str> {
     reasons
 }
 
+fn batch_risk_reasons(candidates: &[CacheCandidate]) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    for candidate in candidates {
+        for reason in risk_reasons(candidate) {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+    }
+    reasons
+}
+
 fn cleanup_message(report: &CleanReport) -> String {
     if report.cleaned == 1 {
-        format!(
+        let mut message = format!(
             "Deleted cache · {} reclaimed",
             format_bytes(report.bytes_reclaimed_estimate)
-        )
+        );
+        if report.skipped > 0 {
+            message.push_str(&format!(" · {} skipped", report.skipped));
+        }
+        message
+    } else if report.cleaned > 1 {
+        let mut message = format!(
+            "Deleted {} caches · {} reclaimed",
+            report.cleaned,
+            format_bytes(report.bytes_reclaimed_estimate)
+        );
+        if report.skipped > 0 {
+            message.push_str(&format!(" · {} skipped", report.skipped));
+        }
+        message
     } else if let Some(skipped) = report.skipped_paths.first() {
-        format!("Could not delete cache · {}", skipped.reason)
+        if report.skipped == 1 {
+            format!("Could not delete cache · {}", skipped.reason)
+        } else {
+            format!("Could not delete {} caches", report.skipped)
+        }
     } else {
         "Nothing was deleted".to_owned()
     }
@@ -704,6 +813,8 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<WorkerMessage>) {
                 app.cursor = 0;
                 app.rebuild_visible();
             }
+            KeyCode::Char(' ') => app.toggle_focused_selection(),
+            KeyCode::Char('a') => app.toggle_visible_selection(),
             KeyCode::Char('s') => {
                 app.sort = app.sort.next();
                 app.cursor = 0;
@@ -768,11 +879,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     };
     let total_bytes: u64 = app.candidates.iter().map(|candidate| candidate.bytes).sum();
     let summary = if app.phase == Phase::Scanning {
-        if app.ui.unicode {
-            "Scanning…".to_owned()
-        } else {
-            "Scanning...".to_owned()
-        }
+        String::new()
     } else {
         let warnings = if app.warnings.is_empty() {
             String::new()
@@ -864,7 +971,15 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|index| {
             let candidate = &app.candidates[*index];
-            let marker = if candidate.cleanable {
+            let is_selected = app.selected.contains(&candidate.path);
+            let marker = if is_selected {
+                Span::styled(
+                    if app.ui.unicode { "✓" } else { "x" },
+                    Style::default()
+                        .fg(palette.success)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if candidate.cleanable {
                 Span::raw(" ")
             } else {
                 Span::styled(
@@ -879,7 +994,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
                 CacheScope::Project => "project",
                 CacheScope::Global => "global",
             };
-            let row_style = if !candidate.cleanable {
+            let row_style = if is_selected {
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD)
+            } else if !candidate.cleanable {
                 Style::default().fg(palette.muted)
             } else {
                 Style::default().fg(palette.text)
@@ -915,12 +1034,24 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
             Row::new(cells).style(row_style)
         })
         .collect();
+    let selection = if app.selected.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{}{} selected{}{}",
+            app.ui.separator(),
+            app.selected.len(),
+            app.ui.separator(),
+            format_bytes(app.selected_bytes())
+        )
+    };
     let title = format!(
-        " Caches{}{}{}{}{} ",
+        " Caches{}{}{}{}{}{} ",
         app.ui.separator(),
         app.view_scope.label(),
         app.ui.separator(),
         app.sort.label(app.ui.unicode),
+        selection,
         if app.query.is_empty() {
             String::new()
         } else {
@@ -1029,8 +1160,15 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
     let action = if !candidate.cleanable {
         Span::styled("scan-only", Style::default().fg(palette.muted))
     } else {
+        let selected = app.selected.contains(&candidate.path);
+        let value = match (selected, app.selected.len()) {
+            (true, 1) => "selected · Space unselect · d delete".to_owned(),
+            (true, count) => format!("selected · Space unselect · d delete {count}"),
+            (false, 0) => "Space select · d delete".to_owned(),
+            (false, count) => format!("Space select · d delete {count}"),
+        };
         Span::styled(
-            "press d to delete",
+            value,
             Style::default()
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
@@ -1193,30 +1331,38 @@ fn footer_shortcuts_for_width(app: &App, movement: &'static str, width: u16) -> 
         return Line::from(vec![
             key(movement, palette),
             hint("move", palette),
+            key("space", palette),
+            hint("select", palette),
             key("d", palette),
             hint("delete", palette),
-            key("/", palette),
-            hint("filter", palette),
             key("?", palette),
             hint("help", palette),
         ]);
     }
-    Line::from(vec![
+    let mut spans = vec![
         key(movement, palette),
         hint("move", palette),
+        key("space", palette),
+        hint("select", palette),
+        key("a", palette),
+        hint("all", palette),
         key("d", palette),
         hint("delete", palette),
         key("/", palette),
         hint("filter", palette),
         key("tab", palette),
         hint("scope", palette),
-        key("s", palette),
-        hint("sort", palette),
-        key("r", palette),
-        hint("rescan", palette),
-        key("?", palette),
-        hint("help", palette),
-    ])
+    ];
+    if width >= 110 {
+        spans.extend([
+            key("s", palette),
+            hint("sort", palette),
+            key("r", palette),
+            hint("rescan", palette),
+        ]);
+    }
+    spans.extend([key("?", palette), hint("help", palette)]);
+    Line::from(spans)
 }
 
 fn key(value: &'static str, palette: Palette) -> Span<'static> {
@@ -1295,43 +1441,68 @@ fn render_error(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_reviewing(frame: &mut Frame, area: Rect, app: &App) {
+    let detail = if app.deleting.len() > 1 {
+        format!(
+            "Remeasuring {} selected caches before delete",
+            app.deleting.len()
+        )
+    } else {
+        "Remeasuring size and recent activity before delete".to_owned()
+    };
     render_progress_modal(
         frame,
         area,
         app,
         "Checking current cache state",
-        "Remeasuring size and recent activity before delete",
+        &detail,
         " Check ",
     );
 }
 
 fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(candidate) = &app.pending_delete else {
+    if app.pending_delete.is_empty() {
         return;
-    };
+    }
     let palette = app.ui.palette;
     let modal = centered_box(76, 11, area);
-    let reasons = risk_reasons(candidate).join(app.ui.separator());
-    let path = truncate_middle(
-        &candidate.path.display().to_string(),
-        modal.width.saturating_sub(6) as usize,
-        app.ui.unicode,
-    );
+    let reasons = batch_risk_reasons(&app.pending_delete).join(app.ui.separator());
+    let bytes: u64 = app
+        .pending_delete
+        .iter()
+        .map(|candidate| candidate.bytes)
+        .sum();
+    let count = app.pending_delete.len();
+    let (question, subject) = if count == 1 {
+        let candidate = &app.pending_delete[0];
+        (
+            format!("Delete {}?", candidate.kind),
+            truncate_middle(
+                &candidate.path.display().to_string(),
+                modal.width.saturating_sub(6) as usize,
+                app.ui.unicode,
+            ),
+        )
+    } else {
+        (
+            format!("Delete {count} selected caches?"),
+            "Every target will be checked again immediately before removal".to_owned(),
+        )
+    };
     frame.render_widget(Clear, modal);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                format!("Delete {}?", candidate.kind),
+                question,
                 Style::default()
                     .fg(palette.text)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from(Span::styled(path, Style::default().fg(palette.muted))),
+            Line::from(Span::styled(subject, Style::default().fg(palette.muted))),
             Line::from(""),
             Line::from(vec![
                 Span::styled(
-                    format_bytes(candidate.bytes),
+                    format_bytes(bytes),
                     Style::default()
                         .fg(palette.accent)
                         .add_modifier(Modifier::BOLD),
@@ -1377,11 +1548,14 @@ fn render_cleaning(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         "Working..."
     };
-    let detail = app
-        .deleting
-        .as_ref()
-        .and_then(|path| path.file_name())
-        .map_or_else(|| fallback.into(), |name| name.to_string_lossy());
+    let detail = if app.deleting.len() > 1 {
+        format!("{} selected caches", app.deleting.len()).into()
+    } else {
+        app.deleting
+            .first()
+            .and_then(|path| path.file_name())
+            .map_or_else(|| fallback.into(), |name| name.to_string_lossy())
+    };
     render_progress_modal(frame, area, app, "Deleting cache", &detail, " Delete ");
 }
 
@@ -1426,12 +1600,15 @@ fn render_progress_modal(
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     let palette = app.ui.palette;
-    let modal = centered_box(78, 14, area);
+    let modal = centered_box(78, 16, area);
     frame.render_widget(Clear, modal);
-    let rows = if modal.width < 72 {
+    let compact = modal.width < 72;
+    let rows = if compact {
         [
             ("Up/Down j/k", "Move"),
-            ("d", "Delete; confirms risky caches"),
+            ("Space", "Select and move down"),
+            ("a", "Select/unselect visible"),
+            ("d", "Delete selection or focused cache"),
             ("/", "Filter"),
             ("Tab", "Cycle scope"),
             ("s", "Cycle sort"),
@@ -1441,7 +1618,9 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         [
             ("↑ / ↓  j / k", "Move through caches"),
-            ("d", "Delete the focused cache; confirm when risky"),
+            ("Space", "Select or unselect, then move down"),
+            ("a", "Select or unselect all visible caches"),
+            ("d", "Delete selected caches, or the focused cache"),
             ("/", "Filter by path, kind, or ecosystem"),
             ("Tab", "Cycle all, project, and global caches"),
             ("s", "Cycle size, age, and name sorting"),
@@ -1449,15 +1628,19 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             ("q / Ctrl+C", "Quit"),
         ]
     };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "One key does one thing.",
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
+    let mut lines = if compact {
+        Vec::new()
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "Space builds a batch; d deletes it.",
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ]
+    };
     lines.extend(rows.into_iter().map(|(shortcut, description)| {
         Line::from(vec![
             Span::styled(
@@ -1469,21 +1652,21 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(description, Style::default().fg(palette.text)),
         ])
     }));
-    lines.extend([
-        Line::from(""),
-        Line::from(Span::styled(
+    lines.push(Line::from(""));
+    if !compact {
+        lines.push(Line::from(Span::styled(
             if app.ui.unicode {
                 "× marks catalog entries that are scan-only."
             } else {
                 "x marks catalog entries that are scan-only."
             },
             Style::default().fg(palette.muted),
-        )),
-        Line::from(Span::styled(
-            "Press ? or Esc to close",
-            Style::default().fg(palette.info),
-        )),
-    ]);
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "Press ? or Esc to close",
+        Style::default().fg(palette.info),
+    )));
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
@@ -1661,6 +1844,39 @@ mod tests {
         (temp, target, app)
     }
 
+    fn two_project_app() -> (tempfile::TempDir, Vec<PathBuf>, App) {
+        let temp = tempdir().unwrap();
+        let mut targets = Vec::new();
+        for name in ["alpha", "beta"] {
+            let project = temp.path().join(name);
+            let target = project.join("target");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(
+                project.join("Cargo.toml"),
+                format!("[package]\nname='{name}'\n"),
+            )
+            .unwrap();
+            fs::write(target.join("artifact"), [7_u8; 64]).unwrap();
+            targets.push(target);
+        }
+        let options = Options {
+            roots: vec![temp.path().to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+        };
+        let report = discover(&DiscoveryOptions {
+            roots: options.roots.clone(),
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 7,
+        })
+        .unwrap();
+        let mut app = test_app(options);
+        let (tx, _rx) = mpsc::channel();
+        app.handle_worker(WorkerMessage::Scan(Ok(report)), &tx);
+        (temp, targets, app)
+    }
+
     #[test]
     fn scope_and_sort_cycles_are_predictable() {
         assert_eq!(ViewScope::All.next(), ViewScope::Project);
@@ -1678,6 +1894,75 @@ mod tests {
         assert_eq!(app.cursor, 0);
         app.move_cursor(-10);
         assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn space_selects_and_advances_while_a_toggles_the_visible_batch() {
+        let (_temp, _targets, mut app) = two_project_app();
+        let (tx, _rx) = mpsc::channel();
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.selected.len(), 1);
+        assert_eq!(app.cursor, 1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.selected.len(), 2);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert!(app.selected.is_empty());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.selected.len(), 2);
+    }
+
+    #[test]
+    fn d_reviews_confirms_and_deletes_the_selected_batch() {
+        let (_temp, targets, mut app) = two_project_app();
+        let (tx, rx) = mpsc::channel();
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &tx,
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Reviewing);
+        receive_worker(&mut app, &tx, &rx);
+        assert_eq!(app.phase, Phase::Confirming);
+        assert_eq!(app.pending_delete.len(), 2);
+        assert!(render_text(&mut app, 80, 24).contains("Delete 2 selected caches?"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &tx,
+        );
+        receive_worker(&mut app, &tx, &rx);
+        assert_eq!(app.phase, Phase::Cleaning);
+        receive_worker(&mut app, &tx, &rx);
+
+        assert!(targets.iter().all(|target| !target.exists()));
+        assert!(app.selected.is_empty());
+        assert!(app.candidates.is_empty());
     }
 
     #[test]
@@ -1817,7 +2102,7 @@ mod tests {
         receive_worker(&mut app, &tx, &rx);
 
         assert_eq!(app.phase, Phase::Confirming);
-        assert_eq!(app.pending_delete.as_ref().unwrap().age_days, Some(0));
+        assert_eq!(app.pending_delete[0].age_days, Some(0));
         assert!(target.exists());
     }
 
@@ -1880,7 +2165,7 @@ mod tests {
         candidate.path = PathBuf::from(
             "/a/very/long/project/path/that/must/not/push/the/destructive/controls/offscreen/target",
         );
-        app.pending_delete = Some(candidate);
+        app.pending_delete = vec![candidate];
         app.phase = Phase::Confirming;
 
         let output = render_text(&mut app, 58, 16);
@@ -1907,7 +2192,16 @@ mod tests {
         let wide = render_text(&mut app, 140, 40);
         assert!(wide.contains("Caches"));
         assert!(wide.contains("Inspect"));
-        assert!(wide.contains("press d to delete"));
+        assert!(wide.contains("Space select"));
+        assert!(wide.contains("d delete"));
+    }
+
+    #[test]
+    fn scanning_header_states_the_status_once() {
+        let mut app = test_app(options());
+        let output = render_text(&mut app, 80, 24).to_ascii_lowercase();
+
+        assert_eq!(output.matches("scanning").count(), 1, "{output}");
     }
 
     #[test]
@@ -1921,7 +2215,9 @@ mod tests {
         for expected in [
             "Keyboard",
             "Up/Down j/k",
-            "Delete; confirms risky caches",
+            "Select and move down",
+            "Select/unselect visible",
+            "Delete selection or focused cache",
             "Cycle scope",
             "Cycle sort",
             "Press ? or Esc to close",

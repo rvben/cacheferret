@@ -6,6 +6,16 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Fast TUI batch selection with `Space` to toggle and advance, `a` to toggle all
+  visible deletable caches, and `d` to delete the selection with one proportional
+  confirmation.
+
+### Fixed
+
+- Removed the duplicated scanning status from the TUI header.
+
 ## [0.2.0] - 2026-08-18
 
 ### Added

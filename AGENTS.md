@@ -19,21 +19,24 @@ The product has two equally important faces:
 - For scripts and agents, piped output is structured JSON and the command
   surface follows clispec.dev v0.3.
 
-The interaction model should feel familiar to ncdu/gdu users: focus an item and
-press `d` to delete it. Do not add blanket confirmation or ceremony to every
-delete. Ask for a compact `y`/`n` confirmation only when the freshly measured
-target is risky: recent, at least 1 GiB, shared/global, unknown-age, or dependent
-on a package download for restoration. Catalog entries marked scan-only must
-never be deleted.
+The interaction model should feel familiar to ncdu/gdu users: `Space` toggles a
+cache and advances, `a` toggles all deletable caches in the visible view, and
+`d` deletes the selection (or the focused item when there is no selection). Do
+not add blanket confirmation or ceremony to every delete. Ask for one compact
+`y`/`n` confirmation for the operation only when a freshly measured target is
+risky: recent, at least 1 GiB, shared/global, unknown-age, or dependent on a
+package download for restoration. Catalog entries marked scan-only must never
+be selectable or deletable.
 
 ## Product principles learned in the 0.2.0 session
 
-1. Directness is part of safety. A clear focused-item action is easier to
-   understand than a multi-step selection workflow.
+1. Directness is part of safety. Keep `d` as an immediate focused-item action,
+   while also preserving rapid `Space`/`a` batch selection for larger cleanups.
 2. Guardrails should be proportional and contextual. Low-risk cache deletion
    should be one keypress; risky deletion should require one explicit answer.
 3. Safety checks belong close to mutation, not as repeated user friction.
-   Pressing `d` remeasures in the background, and deletion revalidates path,
+   Pressing `d` remeasures the whole operation in the background, and deletion
+   revalidates each path,
    filesystem identity, containment, kind, ownership markers, and symlink
    policy immediately before removal.
 4. The TUI is the product experience, not a decorative wrapper around the CLI.
@@ -48,6 +51,8 @@ never be deleted.
 7. Be precise about what is rebuildable. Maven's local repository and the
    shared renv cache are scan-only; Docker build data requires a future native
    Docker integration rather than directory deletion.
+8. Avoid repeating the same state label within one region. During scanning the
+   header should have one status label; supporting detail belongs in the body.
 
 ## Current release state
 
@@ -82,4 +87,3 @@ baseline passed:
 Python packaging uses Maturin binary bindings; it distributes the same Rust
 executable rather than a Python reimplementation. Keep Cargo and Python package
 versions synchronized.
-
