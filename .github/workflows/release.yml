@@ -187,15 +187,23 @@ jobs:
     needs: github-release
     if: ${{ inputs.dry_run != true }}
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
     steps:
+      - name: Skip when Homebrew credentials are not configured
+        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY == '' }}
+        run: echo "HOMEBREW_TAP_DEPLOY_KEY is not configured; skipping tap update"
       - uses: actions/checkout@v4
+        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
       - name: Download release archives
+        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: /tmp/artifacts
 
       - name: Compute SHA256 hashes
+        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         id: hashes
         run: |
           for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
@@ -205,15 +213,18 @@ jobs:
           done
 
       - uses: webfactory/ssh-agent@v0.9.1
+        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         with:
-          ssh-private-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          ssh-private-key: ${{ env.HOMEBREW_TAP_DEPLOY_KEY }}
 
       - name: Trust GitHub's SSH host key
+        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Update Homebrew formula
+        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION_NUM="${VERSION#v}"
