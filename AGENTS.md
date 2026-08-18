@@ -56,16 +56,16 @@ be selectable or deletable.
 
 ## Current release state
 
-- Current version: `0.2.0`, released 2026-08-18.
-- Published to crates.io: <https://crates.io/crates/cacheferret/0.2.0>
-- Published to PyPI: <https://pypi.org/project/cacheferret/0.2.0/>
+- Current version: `0.2.1`, released 2026-08-18.
+- Published to crates.io: <https://crates.io/crates/cacheferret/0.2.1>
+- Published to PyPI: <https://pypi.org/project/cacheferret/0.2.1/>
 - PyPI provides native x86_64/aarch64 wheels for macOS and manylinux2014 Linux,
   plus an sdist. Windows is not currently a supported wheel target.
-- The release was verified with fresh public installs from both registries;
-  both binaries reported `cacheferret 0.2.0`.
-- The local annotated `v0.2.0` tag points to release commit `f273b99`.
-- A public GitHub repository was created at `rvben/cacheferret`, but source and
-  tag publication were not completed during the session. Check remote state
+- Both registry releases were verified with fresh public installs reporting
+  `cacheferret 0.2.1`; PyPI exposes all five expected artifacts.
+- Vership created local release commit `663f428` and annotated tag `v0.2.1`.
+- A public GitHub repository exists at `rvben/cacheferret`, but source and tag
+  publication were not completed during the session. Check remote state
   before assuming GitHub releases, badges, or compare links work.
 - Never copy local Cargo or PyPI credentials into GitHub secrets without the
   user's explicit authorization. Registry publishing can be performed locally;
@@ -74,10 +74,10 @@ be selectable or deletable.
 
 ## Release and quality baseline
 
-Before release, run the documented checklist in `docs/releasing.md`. The 0.2.0
+Before release, run the documented checklist in `docs/releasing.md`. The 0.2.1
 baseline passed:
 
-- `make check`: formatting, Clippy, and 34 tests.
+- `make check`: formatting, Clippy, packaging syntax, and 37 tests.
 - `make conformance`: 24/24 clispec.dev checks.
 - `cargo audit`: no known advisories.
 - `cargo publish --dry-run --locked` and Cargo package verification.

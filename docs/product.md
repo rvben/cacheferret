@@ -116,9 +116,9 @@ for automation. At minimum:
 
 ## Current distribution
 
-Version 0.2.0 is published on
-[crates.io](https://crates.io/crates/cacheferret/0.2.0) and
-[PyPI](https://pypi.org/project/cacheferret/0.2.0/). Users can install it with:
+Version 0.2.1 is published on
+[crates.io](https://crates.io/crates/cacheferret/0.2.1) and
+[PyPI](https://pypi.org/project/cacheferret/0.2.1/). Users can install it with:
 
 ```sh
 cargo install cacheferret

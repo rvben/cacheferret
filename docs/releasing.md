@@ -18,18 +18,24 @@ Bootstrap the repository secrets with `clihatch secrets rvben/cacheferret
 
 ## Release checklist
 
-1. Move noteworthy entries from `Unreleased` into a dated version section.
-2. Set the same version in `Cargo.toml`, then run `cargo update -w` to refresh
-   `Cargo.lock` if needed.
-3. Run `make check`, `make conformance`, `cargo package --locked`, and
+1. Put user-visible changes under the appropriate headings in `Unreleased`.
+2. Preview the release with `vership bump patch --dry-run` (or `minor`/`major`).
+3. Run `vership preflight`, `make conformance`, `cargo package --locked`, and
    `maturin build --release --locked --sdist`.
-4. Commit with `chore(release): prepare vX.Y.Z`.
-5. Push `main`, then create and push the signed or annotated `vX.Y.Z` tag.
-6. Watch every release job. Re-run only failed jobs with
+4. Run `vership bump patch`. Vership synchronizes the Cargo and Maturin version,
+   promotes `Unreleased`, runs its checks, creates the Conventional Commit and
+   annotated tag, and pushes `main` plus the tag. The `make release-patch`,
+   `release-minor`, and `release-major` targets are aliases for this step.
+5. Watch every release job. Re-run only failed jobs with
    `gh run rerun <run-id> --failed`.
-7. Verify the GitHub checksums, `cargo install cacheferret`,
+6. Run `vership verify X.Y.Z`, then verify the GitHub checksums,
+   `cargo install cacheferret`,
    `pipx install cacheferret`, and `brew install rvben/tap/cacheferret` on a
    clean machine.
+
+Use `vership bump patch --no-push` only when the release must remain local to
+the source checkout. In that mode, publish the validated crate and Python
+artifacts directly, then run `vership verify X.Y.Z --targets crates,pypi`.
 
 The workflow rejects tags that do not exactly match the Cargo package version.
 A manual `workflow_dispatch` starts in dry-run mode and is the preferred final
