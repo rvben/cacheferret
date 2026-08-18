@@ -143,14 +143,18 @@ jobs:
     name: Publish to crates.io
     needs: build
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Skip when crates.io credentials are not configured
+        if: ${{ github.event_name == 'push' && env.CARGO_REGISTRY_TOKEN == '' }}
+        run: echo "CARGO_REGISTRY_TOKEN is not configured; publishing is handled externally"
+
       - name: Publish to crates.io
-        if: ${{ inputs.dry_run != true && inputs.skip_crates_io != true }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        if: ${{ inputs.dry_run != true && inputs.skip_crates_io != true && env.CARGO_REGISTRY_TOKEN != '' }}
         run: cargo publish --locked
 
       - name: Test crates.io publish (dry run)
