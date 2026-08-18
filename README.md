@@ -181,6 +181,7 @@ make conformance  # build and score the CLI against clispec.dev
 ```
 
 See [docs/releasing.md](docs/releasing.md) for the release checklist and
+[docs/product.md](docs/product.md) for the durable product direction. See
 [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 The generated mascot and wordmark in `assets/` are initial brand concepts. A
