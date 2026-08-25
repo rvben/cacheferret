@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/rvben/cacheferret/compare/v0.3.0...v0.3.1) - 2026-08-25
+
 ### Fixed
 
 - Removed the unsupported `--locked` argument from the PyPI source-distribution
