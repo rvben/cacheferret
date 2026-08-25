@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/rvben/cacheferret/compare/v0.2.1...v0.3.0) - 2026-08-25
+
 ### Added
 
 - Conservative macOS temporary-storage discovery for abandoned Chrome
