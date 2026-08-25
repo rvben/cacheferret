@@ -347,7 +347,7 @@ pub(crate) fn revalidate_for_delete(candidate: &CacheCandidate) -> Result<(), St
 fn requires_quiescent_tree(kind: &str) -> bool {
     matches!(
         kind,
-        "macos-chrome-signing-clones" | "macos-temporary-build-cache"
+        "macos-chrome-signing-clones" | "macos-temporary-build-cache" | "macos-temporary-workspace"
     )
 }
 
@@ -548,6 +548,8 @@ mod tests {
 
     #[test]
     fn temporary_candidates_must_stay_unchanged_until_deletion() {
+        assert!(requires_quiescent_tree("macos-temporary-workspace"));
+
         let temp = tempdir().unwrap();
         let target = temp.path().join("cache");
         fs::create_dir(&target).unwrap();

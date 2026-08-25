@@ -383,12 +383,14 @@ impl App {
             return;
         };
         let candidate = &self.candidates[index];
-        if !candidate.cleanable {
-            self.toast = Some(("This cache is scan-only".to_owned(), Instant::now()));
-            return;
-        }
         if !self.selected.remove(&candidate.path) {
             self.selected.insert(candidate.path.clone());
+            if !candidate.cleanable {
+                self.toast = Some((
+                    "Selected scan-only cache; delete requires confirmation".to_owned(),
+                    Instant::now(),
+                ));
+            }
         }
         self.move_cursor(1);
     }
@@ -506,7 +508,10 @@ impl App {
             };
             let candidate = self.candidates[index].clone();
             if !candidate.cleanable {
-                self.toast = Some(("This cache is scan-only".to_owned(), Instant::now()));
+                self.toast = Some((
+                    "Select this scan-only cache with Space to override".to_owned(),
+                    Instant::now(),
+                ));
                 return;
             }
             vec![candidate]
@@ -554,7 +559,16 @@ impl App {
         });
     }
 
-    fn delete_candidates(&mut self, candidates: Vec<CacheCandidate>, tx: &Sender<WorkerMessage>) {
+    fn delete_candidates(
+        &mut self,
+        mut candidates: Vec<CacheCandidate>,
+        tx: &Sender<WorkerMessage>,
+    ) {
+        for candidate in &mut candidates {
+            if !candidate.cleanable && self.selected.contains(&candidate.path) {
+                candidate.cleanable = true;
+            }
+        }
         self.phase = Phase::Cleaning;
         self.scan_started = Instant::now();
         self.deleting = candidates
@@ -570,6 +584,9 @@ impl App {
 
 fn risk_reasons(candidate: &CacheCandidate) -> Vec<&'static str> {
     let mut reasons = Vec::new();
+    if !candidate.cleanable {
+        reasons.push("manual override");
+    }
     match candidate.age_days {
         Some(days) if days < RECENT_DAYS => reasons.push("recent"),
         None => reasons.push("unknown age"),
@@ -602,7 +619,7 @@ fn batch_risk_reasons(candidates: &[CacheCandidate]) -> Vec<&'static str> {
 fn cleanup_message(report: &CleanReport) -> String {
     if report.cleaned == 1 {
         let mut message = format!(
-            "Deleted cache · {} reclaimed",
+            "Deleted cache · {} scanned size removed",
             format_bytes(report.bytes_reclaimed_estimate)
         );
         if report.skipped > 0 {
@@ -611,7 +628,7 @@ fn cleanup_message(report: &CleanReport) -> String {
         message
     } else if report.cleaned > 1 {
         let mut message = format!(
-            "Deleted {} caches · {} reclaimed",
+            "Deleted {} caches · {} scanned size removed",
             report.cleaned,
             format_bytes(report.bytes_reclaimed_estimate)
         );
@@ -1157,11 +1174,14 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         "local rebuild"
     };
-    let action = if !candidate.cleanable {
-        Span::styled("scan-only", Style::default().fg(palette.muted))
+    let selected = app.selected.contains(&candidate.path);
+    let separator = app.ui.separator();
+    let action = if !candidate.cleanable && !selected {
+        Span::styled(
+            format!("Space override{separator}scan-only"),
+            Style::default().fg(palette.muted),
+        )
     } else {
-        let selected = app.selected.contains(&candidate.path);
-        let separator = app.ui.separator();
         let value = match (selected, app.selected.len()) {
             (true, 1) => format!("selected{separator}Space unselect{separator}d delete"),
             (true, count) => {
@@ -1236,7 +1256,9 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
 
 fn candidate_description(kind: &str) -> Option<&'static str> {
     match kind {
-        "macos-chrome-signing-clones" => Some("temporary Chrome app copies left by code signing"),
+        "macos-chrome-signing-clones" => {
+            Some("APFS Chrome clones; shown size can exceed unique disk blocks")
+        }
         "macos-temporary-build-cache" => Some("recognized rebuildable output under /private/tmp"),
         "macos-temporary-workspace" => {
             Some("large temp checkout; inspect manually because work may be unique")
@@ -1677,9 +1699,9 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     if !compact {
         lines.push(Line::from(Span::styled(
             if app.ui.unicode {
-                "× marks catalog entries that are scan-only."
+                "× marks scan-only entries; select one explicitly to override."
             } else {
-                "x marks catalog entries that are scan-only."
+                "x marks scan-only entries; select one explicitly to override."
             },
             Style::default().fg(palette.muted),
         )));
@@ -2041,6 +2063,52 @@ mod tests {
             &tx,
         );
         assert_eq!(app.phase, Phase::Reviewing);
+        receive_worker(&mut app, &tx, &rx);
+        assert_eq!(app.phase, Phase::Cleaning);
+        receive_worker(&mut app, &tx, &rx);
+
+        assert!(!target.exists());
+        assert_eq!(app.phase, Phase::Ready);
+    }
+
+    #[test]
+    fn explicitly_selected_scan_only_cache_can_be_overridden() {
+        let (_temp, target, mut app) = project_app();
+        app.candidates[0].cleanable = false;
+        let (tx, rx) = mpsc::channel();
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert!(
+            app.selected.is_empty(),
+            "batch selection must not override policy"
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.selected.len(), 1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &tx,
+        );
+        receive_worker(&mut app, &tx, &rx);
+        assert_eq!(app.phase, Phase::Confirming);
+        assert!(render_text(&mut app, 80, 24).contains("manual override"));
+        assert!(target.exists());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &tx,
+        );
         receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Cleaning);
         receive_worker(&mut app, &tx, &rx);
