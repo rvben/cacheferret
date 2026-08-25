@@ -1,11 +1,14 @@
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[cfg(target_os = "macos")]
+use std::env;
 
 use crate::catalog::{GlobalPath, valid_cachedir_tag};
 
 const LARGE_TEMP_WORKSPACE_BYTES: u64 = 100 * 1024 * 1024;
 
+#[cfg(target_os = "macos")]
 pub(crate) fn temporary_paths(home: &Path) -> Vec<GlobalPath> {
     let Some(user_temp_container) = env::temp_dir()
         .canonicalize()
