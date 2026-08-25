@@ -195,7 +195,7 @@ pub fn contract_json(path: &[String]) -> String {
 fn discovery_args(default_scope: &str, paging: bool) -> Vec<Value> {
     let mut args = vec![
         json!({"name": "--root", "type": "path[]", "required": false, "description": "Project directory to scan. Repeat for multiple roots; defaults to common source directories."}),
-        json!({"name": "--scope", "type": "string", "enum": ["all", "project", "global"], "default": default_scope, "description": "Cache locations to include."}),
+        json!({"name": "--scope", "type": "string", "enum": ["all", "project", "global"], "default": default_scope, "description": "Project caches, global caches, and recognized temporary-storage locations to include."}),
         json!({"name": "--kind", "type": "string[]", "required": false, "description": "Restrict to kinds returned by `cacheferret catalog`."}),
         json!({"name": "--protect-days", "type": "integer", "default": 7, "description": "Consider caches modified within this many days protected."}),
     ];

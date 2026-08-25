@@ -19,6 +19,7 @@ pub(crate) struct GlobalPath {
     pub ecosystem: &'static str,
     pub network_restore: bool,
     pub cleanable: bool,
+    pub minimum_bytes: u64,
 }
 
 macro_rules! entry {
@@ -343,6 +344,27 @@ pub fn catalog() -> Vec<CatalogEntry> {
             true
         ),
         entry!(
+            "macos-chrome-signing-clones",
+            "macos",
+            Global,
+            "Temporary Google Chrome copies left behind by code signing",
+            false
+        ),
+        entry!(
+            "macos-temporary-build-cache",
+            "macos",
+            Global,
+            "Recognized developer build output in macOS temporary storage",
+            false
+        ),
+        blocked_entry!(
+            "macos-temporary-workspace",
+            "macos",
+            Global,
+            "Large temporary project workspace (scan only; may contain unique work)",
+            false
+        ),
+        entry!(
             "cachedir-tag",
             "other",
             Project,
@@ -500,7 +522,7 @@ fn has_dotnet_project(parent: &Path) -> bool {
         .any(|extension| has_extension(parent, extension))
 }
 
-fn valid_cachedir_tag(path: &Path) -> bool {
+pub(crate) fn valid_cachedir_tag(path: &Path) -> bool {
     const SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
     fs::read_to_string(path.join("CACHEDIR.TAG"))
         .is_ok_and(|contents| contents.lines().next() == Some(SIGNATURE))
@@ -591,6 +613,9 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
         }
 
         add_ruby_gem_caches(home, &mut paths);
+
+        #[cfg(target_os = "macos")]
+        paths.extend(crate::macos::temporary_paths(home));
     }
 
     if let Some(cache) = &cache {
@@ -671,6 +696,7 @@ fn global(
         ecosystem,
         network_restore,
         cleanable: true,
+        minimum_bytes: 0,
     }
 }
 
@@ -686,6 +712,7 @@ fn global_blocked(
         ecosystem,
         network_restore,
         cleanable: false,
+        minimum_bytes: 0,
     }
 }
 
@@ -732,7 +759,11 @@ mod tests {
     #[test]
     fn potentially_irreplaceable_shared_stores_are_scan_only() {
         let entries = catalog();
-        for kind in ["maven-repository", "renv-cache"] {
+        for kind in [
+            "maven-repository",
+            "renv-cache",
+            "macos-temporary-workspace",
+        ] {
             let entry = entries.iter().find(|entry| entry.kind == kind).unwrap();
             assert!(!entry.cleanable, "{kind} must remain scan-only");
         }

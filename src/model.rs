@@ -59,6 +59,8 @@ pub struct CacheCandidate {
     pub(crate) anchor: PathBuf,
     #[serde(skip)]
     pub(crate) identity: FileIdentity,
+    #[serde(skip)]
+    pub(crate) tree_fingerprint: TreeFingerprint,
 }
 
 /// Filesystem identity captured during discovery and checked again before removal.
@@ -70,6 +72,14 @@ pub(crate) struct FileIdentity {
     pub inode: u64,
     #[cfg(not(unix))]
     pub modified_unix: Option<u64>,
+}
+
+/// Volatile-tree state captured during measurement and checked before cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TreeFingerprint {
+    pub bytes: u64,
+    pub entries: u64,
+    pub latest_modified_nanos: Option<u128>,
 }
 
 /// Complete scan result before output pagination.

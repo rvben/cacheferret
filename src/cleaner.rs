@@ -1,7 +1,7 @@
 use std::fs;
 
 use crate::model::SkippedPath;
-use crate::scanner::revalidate;
+use crate::scanner::revalidate_for_delete;
 use crate::{CacheCandidate, CleanReport};
 
 /// Revalidate and remove a batch of candidates.
@@ -49,7 +49,7 @@ pub fn clean_candidates(candidates: &[CacheCandidate], dry_run: bool) -> CleanRe
     let mut reclaimed = 0_u64;
 
     for candidate in &candidates {
-        if let Err(reason) = revalidate(candidate) {
+        if let Err(reason) = revalidate_for_delete(candidate) {
             skipped_paths.push(SkippedPath {
                 path: candidate.path.clone(),
                 reason,

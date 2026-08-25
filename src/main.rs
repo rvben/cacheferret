@@ -59,7 +59,7 @@ struct TuiArgs {
     #[arg(long = "root", value_name = "PATH")]
     roots: Vec<PathBuf>,
 
-    /// Include project caches, shared global caches, or both.
+    /// Include project caches, global caches and recognized temporary storage, or both.
     #[arg(long, value_enum, default_value = "all")]
     scope: CliScope,
 
@@ -99,7 +99,7 @@ struct ScanArgs {
     #[arg(long = "root", value_name = "PATH")]
     roots: Vec<PathBuf>,
 
-    /// Include project caches, shared global caches, or both.
+    /// Include project caches, global caches and recognized temporary storage, or both.
     #[arg(long, value_enum, default_value = "all")]
     scope: CliScope,
 
@@ -144,7 +144,7 @@ struct CleanArgs {
     #[arg(long = "root", value_name = "PATH")]
     roots: Vec<PathBuf>,
 
-    /// Clean project caches, shared global caches, or both.
+    /// Clean project caches, global caches and recognized temporary storage, or both.
     #[arg(long, value_enum, default_value = "project")]
     scope: CliScope,
 
@@ -501,7 +501,7 @@ fn render_scan_text(
     warnings: &[String],
 ) -> String {
     let mut lines = vec![format!(
-        "Found {total} cache directories using {}{}",
+        "Found {total} storage locations using {}{}",
         format_bytes(total_bytes),
         if truncated { " (output truncated)" } else { "" }
     )];

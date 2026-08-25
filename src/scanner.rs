@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::catalog::{global_paths, identify_project_cache};
-use crate::model::FileIdentity;
+use crate::model::{FileIdentity, TreeFingerprint};
 use crate::{CacheCandidate, CacheScope, DiscoveryOptions, Error, ScanReport, catalog};
 
 #[derive(Debug, Clone)]
@@ -19,6 +19,7 @@ struct RawCandidate {
     anchor: PathBuf,
     network_restore: bool,
     cleanable: bool,
+    minimum_bytes: u64,
 }
 
 /// Discover and size every matching cache.
@@ -66,6 +67,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<ScanReport, Error> {
                 anchor,
                 network_restore: global.network_restore,
                 cleanable: global.cleanable,
+                minimum_bytes: global.minimum_bytes,
             });
         }
     }
@@ -144,6 +146,7 @@ fn scan_project_root<F>(
                     anchor: root.to_path_buf(),
                     network_restore: found.network_restore,
                     cleanable: true,
+                    minimum_bytes: 0,
                 });
             }
             walker.skip_current_dir();
@@ -175,7 +178,11 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
         return None;
     }
     let identity = identity(&metadata);
-    let (bytes, modified_unix) = measure_tree(&raw.path);
+    let measurement = measure_tree(&raw.path);
+    if measurement.bytes < raw.minimum_bytes {
+        return None;
+    }
+    let modified_unix = measurement.modified_unix;
     let age_days = modified_unix.map(|modified| now.saturating_sub(modified) / 86_400);
     let protected = age_days.is_none_or(|days| days < protect_days);
 
@@ -184,7 +191,7 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
         ecosystem: raw.ecosystem,
         scope: raw.scope,
         path: raw.path,
-        bytes,
+        bytes: measurement.bytes,
         modified_unix,
         age_days,
         protected,
@@ -192,12 +199,20 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
         cleanable: raw.cleanable,
         anchor: raw.anchor,
         identity,
+        tree_fingerprint: measurement.fingerprint,
     })
 }
 
-fn measure_tree(root: &Path) -> (u64, Option<u64>) {
+struct TreeMeasurement {
+    bytes: u64,
+    modified_unix: Option<u64>,
+    fingerprint: TreeFingerprint,
+}
+
+fn measure_tree(root: &Path) -> TreeMeasurement {
     let mut bytes = 0_u64;
-    let mut latest = None;
+    let mut entries = 0_u64;
+    let mut latest_modified_nanos = None;
     for entry in WalkDir::new(root).follow_links(false).into_iter().flatten() {
         let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
             continue;
@@ -205,18 +220,29 @@ fn measure_tree(root: &Path) -> (u64, Option<u64>) {
         if metadata.file_type().is_symlink() {
             continue;
         }
+        entries = entries.saturating_add(1);
         if metadata.is_file() {
             bytes = bytes.saturating_add(metadata.len());
         }
         if let Ok(modified) = metadata.modified()
             && let Ok(since_epoch) = modified.duration_since(UNIX_EPOCH)
         {
-            latest = Some(latest.map_or(since_epoch.as_secs(), |old: u64| {
-                old.max(since_epoch.as_secs())
-            }));
+            latest_modified_nanos = Some(
+                latest_modified_nanos.map_or(since_epoch.as_nanos(), |old: u128| {
+                    old.max(since_epoch.as_nanos())
+                }),
+            );
         }
     }
-    (bytes, latest)
+    TreeMeasurement {
+        bytes,
+        modified_unix: latest_modified_nanos.map(|nanos| (nanos / 1_000_000_000) as u64),
+        fingerprint: TreeFingerprint {
+            bytes,
+            entries,
+            latest_modified_nanos,
+        },
+    }
 }
 
 /// Revalidate and remeasure a candidate against the current filesystem state.
@@ -234,7 +260,9 @@ pub fn refresh_candidate(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
-    let (bytes, modified_unix) = measure_tree(&candidate.path);
+    let measurement = measure_tree(&candidate.path);
+    let bytes = measurement.bytes;
+    let modified_unix = measurement.modified_unix;
     let age_days = modified_unix.map(|modified| now.saturating_sub(modified) / 86_400);
 
     let mut refreshed = candidate.clone();
@@ -242,6 +270,7 @@ pub fn refresh_candidate(
     refreshed.modified_unix = modified_unix;
     refreshed.age_days = age_days;
     refreshed.protected = age_days.is_none_or(|days| days < protect_days);
+    refreshed.tree_fingerprint = measurement.fingerprint;
     Ok(refreshed)
 }
 
@@ -305,6 +334,25 @@ pub(crate) fn revalidate(candidate: &CacheCandidate) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn revalidate_for_delete(candidate: &CacheCandidate) -> Result<(), String> {
+    revalidate(candidate)?;
+    if requires_quiescent_tree(&candidate.kind) && temporary_tree_changed(candidate) {
+        return Err("temporary storage changed after it was measured; scan again".to_owned());
+    }
+    Ok(())
+}
+
+fn requires_quiescent_tree(kind: &str) -> bool {
+    matches!(
+        kind,
+        "macos-chrome-signing-clones" | "macos-temporary-build-cache"
+    )
+}
+
+fn temporary_tree_changed(candidate: &CacheCandidate) -> bool {
+    measure_tree(&candidate.path).fingerprint != candidate.tree_fingerprint
 }
 
 #[cfg(test)]
@@ -475,5 +523,55 @@ mod tests {
         ] {
             assert!(kinds.contains(expected), "missing {expected}: {kinds:?}");
         }
+    }
+
+    #[test]
+    fn minimum_size_hides_small_diagnostic_locations() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("artifact"), [0_u8; 32]).unwrap();
+
+        let raw = RawCandidate {
+            kind: "macos-temporary-workspace".to_owned(),
+            ecosystem: "macos".to_owned(),
+            scope: CacheScope::Global,
+            path: workspace,
+            anchor: temp.path().to_path_buf(),
+            network_restore: false,
+            cleanable: false,
+            minimum_bytes: 64,
+        };
+
+        assert!(measure_candidate(raw, 7, 0).is_none());
+    }
+
+    #[test]
+    fn temporary_candidates_must_stay_unchanged_until_deletion() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("cache");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("artifact"), [0_u8; 32]).unwrap();
+        let metadata = fs::symlink_metadata(&target).unwrap();
+        let measurement = measure_tree(&target);
+        let candidate = CacheCandidate {
+            kind: "macos-temporary-build-cache".to_owned(),
+            ecosystem: "macos".to_owned(),
+            scope: CacheScope::Global,
+            path: target.clone(),
+            bytes: measurement.bytes,
+            modified_unix: measurement.modified_unix,
+            age_days: Some(0),
+            protected: true,
+            network_restore: false,
+            cleanable: true,
+            anchor: temp.path().to_path_buf(),
+            identity: identity(&metadata),
+            tree_fingerprint: measurement.fingerprint,
+        };
+
+        assert!(!temporary_tree_changed(&candidate));
+        fs::write(target.join("new-artifact"), [0_u8; 64]).unwrap();
+        assert!(temporary_tree_changed(&candidate));
     }
 }

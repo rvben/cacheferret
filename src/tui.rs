@@ -1210,6 +1210,13 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
             ),
             palette,
         ),
+    ]);
+    if area.height >= 11
+        && let Some(description) = candidate_description(&candidate.kind)
+    {
+        lines.push(labeled("About", description.to_owned(), palette));
+    }
+    lines.extend([
         labeled("Restore", restore.to_owned(), palette),
         Line::from(vec![
             Span::styled("Action   ", Style::default().fg(palette.muted)),
@@ -1222,6 +1229,17 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
             .block(detail_block(" Inspect ", app.ui)),
         area,
     );
+}
+
+fn candidate_description(kind: &str) -> Option<&'static str> {
+    match kind {
+        "macos-chrome-signing-clones" => Some("temporary Chrome app copies left by code signing"),
+        "macos-temporary-build-cache" => Some("recognized rebuildable output under /private/tmp"),
+        "macos-temporary-workspace" => {
+            Some("large temp checkout; inspect manually because work may be unique")
+        }
+        _ => None,
+    }
 }
 
 fn detail_block(title: &'static str, ui: UiPreferences) -> Block<'static> {
