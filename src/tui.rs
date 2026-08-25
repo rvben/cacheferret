@@ -1161,11 +1161,14 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("scan-only", Style::default().fg(palette.muted))
     } else {
         let selected = app.selected.contains(&candidate.path);
+        let separator = app.ui.separator();
         let value = match (selected, app.selected.len()) {
-            (true, 1) => "selected · Space unselect · d delete".to_owned(),
-            (true, count) => format!("selected · Space unselect · d delete {count}"),
-            (false, 0) => "Space select · d delete".to_owned(),
-            (false, count) => format!("Space select · d delete {count}"),
+            (true, 1) => format!("selected{separator}Space unselect{separator}d delete"),
+            (true, count) => {
+                format!("selected{separator}Space unselect{separator}d delete {count}")
+            }
+            (false, 0) => format!("Space select{separator}d delete"),
+            (false, count) => format!("Space select{separator}d delete {count}"),
         };
         Span::styled(
             value,
