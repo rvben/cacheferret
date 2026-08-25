@@ -85,6 +85,8 @@ conflict instead of being removed.
 In scope:
 
 - Recognized project and shared caches across supported developer ecosystems.
+- Recognized macOS temporary build caches and diagnostic visibility into large
+  temporary project workspaces.
 - Disk-usage discovery, filtering, sorting, inspection, and focused deletion.
 - Safe batch preview/cleanup for scripts.
 - Human-readable terminal output and clispec.dev v0.3 JSON behavior.
@@ -95,6 +97,8 @@ Out of scope unless deliberately designed later:
 - General arbitrary-directory deletion.
 - Following symlinks.
 - Deleting state that may be the only copy of user-created artifacts.
+- Deleting arbitrary system-temporary contents; uncertain project workspaces
+  remain scan-only even when they live under `/private/tmp`.
 - Treating Docker storage as ordinary directories. Docker cleanup needs a
   Docker-aware integration with native sizing and prune semantics.
 - Claiming Windows support before its discovery rules, terminal behavior,

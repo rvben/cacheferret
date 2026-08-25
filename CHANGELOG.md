@@ -6,6 +6,14 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Conservative macOS temporary-storage discovery for abandoned Chrome
+  code-signing clones, recognized developer build caches under `/private/tmp`,
+  and large temporary project workspaces.
+- Scan-only reporting for temporary workspaces that may contain unique work,
+  plus final change detection before deleting volatile temporary caches.
+
 ## [0.2.1](https://github.com/rvben/cacheferret/compare/v0.2.0...v0.2.1) - 2026-08-18
 
 ### Added

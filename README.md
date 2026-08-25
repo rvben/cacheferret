@@ -99,6 +99,11 @@ cacheferret scan --limit 20 --fields kind,path,bytes |
   clean output.
 - Shared stores that can contain or back irreplaceable project state are
   scan-only and remain excluded even with `--include-recent --yes`.
+- On macOS, CacheFerret recognizes Chrome code-signing clones and strongly
+  identified build caches in system temporary storage. Large temporary project
+  workspaces are visible but scan-only because they may contain unique work.
+- Temporary caches must remain unchanged between their final measurement and
+  deletion. Active writers cause cleanup to stop with a conflict.
 - `--dry-run` follows the same discovery and eligibility policy without
   deleting anything, and lists every selected path with its size and restore
   requirements.
@@ -126,6 +131,7 @@ release covers:
 | Zig/Dart/Elixir | project build and dependency state | Zig, pub, and Hex caches |
 | Haskell | Stack and Cabal project output | Stack and Cabal stores |
 | Terraform/R | modules, providers, renv project libraries | configured provider; renv cache (scan-only) |
+| macOS | — | Chrome signing clones, temporary build caches, and large temporary workspaces (scan-only) |
 | Other | any directory with a valid `CACHEDIR.TAG` | — |
 
 Docker build data is intentionally not treated as a directory cache. It needs a
@@ -135,6 +141,13 @@ is planned as a follow-up.
 The Maven local repository is scan-only because it may contain unpublished
 locally installed artifacts. The shared renv cache is scan-only because project
 libraries may link packages from it.
+
+Temporary-storage discovery is deliberately narrow. CacheFerret only considers
+directories owned by the current user, never follows symlinks, and does not
+treat arbitrary `/private/tmp` contents as deletable. Recognizable build/cache
+names are cleanable; large directories with project markers are reported as
+scan-only diagnostic findings. Global cleanup remains opt-in, and recent
+temporary entries remain protected unless `--include-recent` is supplied.
 
 ## Commands
 
