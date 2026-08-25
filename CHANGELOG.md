@@ -6,6 +6,11 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Removed the unsupported `--locked` argument from the PyPI source-distribution
+  job so current Maturin releases can build and publish the sdist.
+
 ## [0.3.0](https://github.com/rvben/cacheferret/compare/v0.2.1...v0.3.0) - 2026-08-25
 
 ### Added
