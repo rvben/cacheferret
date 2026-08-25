@@ -120,7 +120,9 @@ broad_scan=$(XDG_CACHE_HOME="$test_root/empty-xdg" GOCACHE=/tmp \
 jq -e '.total == 0 and .items == []' <<< "$broad_scan" >/dev/null
 
 # Release-facing Linux output remains usable.
-test "$($cacheferret_bin --version)" = 'cacheferret 0.2.0'
+expected_version=$(cargo metadata --no-deps --format-version 1 |
+  jq -r '.packages[] | select(.name == "cacheferret") | .version')
+test "$($cacheferret_bin --version)" = "cacheferret $expected_version"
 $cacheferret_bin schema | jq -e '.clispec == "0.3"' >/dev/null
 test -n "$($cacheferret_bin completions bash)"
 
