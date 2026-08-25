@@ -62,7 +62,9 @@ Inside the TUI, use the arrow keys or `j`/`k` to move, `Space` to select and
 advance, `a` to toggle all visible caches, and `d` to delete the selection or
 focused cache. Use `/` to filter and `Tab` to cycle scopes. Risky batches use a
 single compact `y`/`n` prompt. Press `?` for the complete shortcut guide.
-Catalog entries marked scan-only cannot be selected or deleted.
+Catalog entries marked scan-only are excluded from focused deletion, `a` batch
+selection, and CLI cleanup. Select one individually with `Space` to request a
+manual override; `d` then requires confirmation and repeats the safety checks.
 
 CacheFerret adapts automatically to truecolor, 256-color, basic ANSI, no-color, and
 non-UTF-8 terminals. Set `NO_COLOR=1` for an uncolored interface,
@@ -98,10 +100,13 @@ cacheferret scan --limit 20 --fields kind,path,bytes |
 - Targets that need package downloads to restore are identified in scan and
   clean output.
 - Shared stores that can contain or back irreplaceable project state are
-  scan-only and remain excluded even with `--include-recent --yes`.
+  scan-only and remain excluded from CLI cleanup even with
+  `--include-recent --yes`. The TUI permits deletion only after individual
+  `Space` selection and an explicit override confirmation.
 - On macOS, CacheFerret recognizes Chrome code-signing clones and strongly
   identified build caches in system temporary storage. Large temporary project
-  workspaces are visible but scan-only because they may contain unique work.
+  workspaces are visible but scan-only because they may contain unique work;
+  they require the same individual TUI override.
 - Temporary caches must remain unchanged between their final measurement and
   deletion. Active writers cause cleanup to stop with a conflict.
 - `--dry-run` follows the same discovery and eligibility policy without

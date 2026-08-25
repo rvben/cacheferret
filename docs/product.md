@@ -67,12 +67,14 @@ when the freshly reviewed target has one or more risk signals:
 - shared/global scope;
 - modification age is unknown; or
 - restoration requires downloading packages again.
+- an individually selected scan-only item requires a manual override.
 
 The prompt should summarize the batch, state the concrete reasons, and accept a
 simple `y`/`n` answer. It is one confirmation for the operation, not one prompt
 per selected cache.
-Scan-only items remain non-deletable rather than presenting a confirmation that
-cannot make the operation safe.
+Scan-only items remain excluded from focused deletion, visible-batch selection,
+and CLI cleanup. A user may select one individually with `Space`; this deliberate
+action unlocks deletion only after the prompt clearly states `manual override`.
 
 This UX policy is separate from filesystem correctness. On `d`, CacheFerret
 remeasures the item before choosing whether to prompt. Immediately before
@@ -96,9 +98,10 @@ Out of scope unless deliberately designed later:
 
 - General arbitrary-directory deletion.
 - Following symlinks.
-- Deleting state that may be the only copy of user-created artifacts.
-- Deleting arbitrary system-temporary contents; uncertain project workspaces
-  remain scan-only even when they live under `/private/tmp`.
+- Implicitly or batch-selecting state that may be the only copy of user-created
+  artifacts; scan-only entries require individual selection and confirmation.
+- Treating arbitrary system-temporary contents as caches; uncertain project
+  workspaces remain scan-only even when they live under `/private/tmp`.
 - Treating Docker storage as ordinary directories. Docker cleanup needs a
   Docker-aware integration with native sizing and prune semantics.
 - Claiming Windows support before its discovery rules, terminal behavior,

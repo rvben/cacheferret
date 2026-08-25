@@ -15,6 +15,10 @@ All notable changes to CacheFerret are documented here. The format follows
   and large temporary project workspaces.
 - Scan-only reporting for temporary workspaces that may contain unique work,
   plus final change detection before deleting volatile temporary caches.
+- An explicit TUI override for individually selected scan-only entries, with a
+  mandatory confirmation and final safety revalidation.
+- Truthful TUI cleanup wording and an APFS-clone size warning, avoiding a claim
+  that apparent directory size equals physically reclaimed disk space.
 
 ## [0.2.1](https://github.com/rvben/cacheferret/compare/v0.2.0...v0.2.1) - 2026-08-18
 
