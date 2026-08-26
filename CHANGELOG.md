@@ -6,6 +6,18 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Vership now updates durable documentation version references inside each
+  release commit and refuses to tag until all GitHub publishing secrets exist.
+- GitHub workflows now use current Node 24 action releases and run strict lint,
+  Linux end-to-end safety, packaging, and crate checks before publication.
+
+### Fixed
+
+- Registry and Homebrew jobs now fail closed instead of reporting success while
+  silently skipping publication when credentials are absent.
+
 ## [0.4.1](https://github.com/rvben/cacheferret/compare/v0.4.0...v0.4.1) - 2026-08-26
 
 ### Fixed

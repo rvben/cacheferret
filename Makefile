@@ -1,4 +1,4 @@
-.PHONY: build release test test-linux-e2e lint fmt check conformance packaging-check clean install release-patch release-minor release-major update-deps
+.PHONY: build release test test-linux-e2e lint fmt check conformance packaging-check release-readiness clean install release-patch release-minor release-major update-deps
 
 build:
 	cargo build
@@ -27,6 +27,9 @@ conformance: release
 
 packaging-check:
 	scripts/test-homebrew-formula.sh
+
+release-readiness:
+	scripts/check-release-secrets.sh
 
 clean:
 	cargo clean

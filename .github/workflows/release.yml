@@ -33,13 +33,42 @@ env:
   CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
+  credentials:
+    name: Verify release credentials
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - name: Explain dry run
+        if: ${{ inputs.dry_run == true }}
+        run: echo "Dry run requested; registry credentials are not required"
+      - name: Require every publishing credential
+        if: ${{ inputs.dry_run != true }}
+        shell: bash
+        run: |
+          missing=()
+          [[ -n "$CARGO_REGISTRY_TOKEN" ]] || missing+=(CARGO_REGISTRY_TOKEN)
+          [[ -n "$HOMEBREW_TAP_DEPLOY_KEY" ]] || missing+=(HOMEBREW_TAP_DEPLOY_KEY)
+          [[ -n "$PYPI_API_TOKEN" ]] || missing+=(PYPI_API_TOKEN)
+          if (( ${#missing[@]} )); then
+            printf 'Missing required release secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
   test:
-    name: Run tests
+    name: Run release gate
+    needs: credentials
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2.86.7
+        with:
+          tool: nextest
       - name: Verify Cargo.lock is up to date
         run: cargo check --locked
       - name: Verify tag matches Cargo version
@@ -47,8 +76,14 @@ jobs:
         run: |
           PACKAGE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           test "v${PACKAGE_VERSION}" = "${GITHUB_REF_NAME}"
+      - name: Run strict linting
+        run: make lint
       - name: Run tests
         run: make test
+      - name: Run Linux end-to-end safety tests
+        run: make test-linux-e2e
+      - name: Verify packaging assets
+        run: make packaging-check
       - name: Verify publishable package
         run: cargo package --locked
 
@@ -57,7 +92,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - name: Generate shell completions
         run: |
@@ -69,7 +104,7 @@ jobs:
           ./target/release/cacheferret completions powershell > support/completions/cacheferret.ps1
           ./target/release/cacheferret completions elvish > support/completions/cacheferret.elv
           cp README.md LICENSE CHANGELOG.md support/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: support-files
           path: support
@@ -94,7 +129,7 @@ jobs:
             cross: true
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -113,7 +148,7 @@ jobs:
         run: |
           mkdir -p release-package
           cp "target/${{ matrix.target }}/release/cacheferret" release-package/cacheferret
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8.0.1
         with:
           name: support-files
           path: release-package
@@ -131,7 +166,7 @@ jobs:
           rm -rf release-package
 
       - name: Upload release archives
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -146,15 +181,11 @@ jobs:
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Skip when crates.io credentials are not configured
-        if: ${{ github.event_name == 'push' && env.CARGO_REGISTRY_TOKEN == '' }}
-        run: echo "CARGO_REGISTRY_TOKEN is not configured; publishing is handled externally"
-
       - name: Publish to crates.io
-        if: ${{ inputs.dry_run != true && inputs.skip_crates_io != true && env.CARGO_REGISTRY_TOKEN != '' }}
+        if: ${{ inputs.dry_run != true && inputs.skip_crates_io != true }}
         run: cargo publish --locked
 
       - name: Test crates.io publish (dry run)
@@ -174,12 +205,12 @@ jobs:
       contents: write
     steps:
       - name: Download release archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           pattern: release-*
           path: artifacts
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           generate_release_notes: true
           files: |
@@ -194,20 +225,14 @@ jobs:
     env:
       HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
     steps:
-      - name: Skip when Homebrew credentials are not configured
-        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY == '' }}
-        run: echo "HOMEBREW_TAP_DEPLOY_KEY is not configured; skipping tap update"
-      - uses: actions/checkout@v4
-        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
+      - uses: actions/checkout@v7.0.1
       - name: Download release archives
-        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           pattern: release-*
           path: /tmp/artifacts
 
       - name: Compute SHA256 hashes
-        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         id: hashes
         run: |
           for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
@@ -216,19 +241,16 @@ jobs:
             echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
           done
 
-      - uses: webfactory/ssh-agent@v0.9.1
-        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
+      - uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ env.HOMEBREW_TAP_DEPLOY_KEY }}
 
       - name: Trust GitHub's SSH host key
-        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Update Homebrew formula
-        if: ${{ env.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION_NUM="${VERSION#v}"

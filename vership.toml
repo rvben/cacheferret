@@ -1,0 +1,24 @@
+[project]
+branch = "main"
+
+[hooks]
+pre-bump = "make release-readiness"
+
+[checks]
+lint = true
+tests = true
+lint_command = "make lint"
+test_command = "make test"
+
+[changelog]
+unconventional = "exclude"
+
+[[version_files]]
+glob = "docs/product.md"
+search = "Version {prev} is published on"
+replace = "Version {version} is published on"
+
+[[version_files]]
+glob = "AGENTS.md"
+search = "- Current version: `{prev}`"
+replace = "- Current version: `{version}`"
