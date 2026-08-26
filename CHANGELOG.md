@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/rvben/cacheferret/compare/v0.3.1...v0.4.0) - 2026-08-26
+
 ### Added
 
 - Allocated-block estimates alongside apparent directory sizes in scans,
