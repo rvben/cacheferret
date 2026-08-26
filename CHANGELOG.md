@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/rvben/cacheferret/compare/v0.4.0...v0.4.1) - 2026-08-26
+
 ### Fixed
 
 - Linux builds now use a platform-correct `statvfs` block-count conversion, and
