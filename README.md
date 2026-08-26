@@ -67,6 +67,12 @@ Catalog entries marked scan-only are excluded from focused deletion, `a` batch
 selection, and CLI cleanup. Select one individually with `Space` to request a
 manual override; `d` then requires confirmation and repeats the safety checks.
 
+After a successful TUI scan, CacheFerret keeps a small private snapshot of known
+cache paths. Later launches show those paths immediately with approximate prior
+sizes while fresh measurements run in the background; stale rows cannot be
+selected or deleted. Set `CACHEFERRET_NO_CACHE=1` to disable this warm-start
+accelerator.
+
 CacheFerret adapts automatically to truecolor, 256-color, basic ANSI, no-color, and
 non-UTF-8 terminals. Set `NO_COLOR=1` for an uncolored interface,
 `CACHEFERRET_ASCII=1` for ASCII-only glyphs, or

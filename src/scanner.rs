@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::catalog::{global_paths, identify_project_cache};
+use crate::catalog::{GlobalPath, global_paths, identify_project_cache};
 use crate::model::{FileIdentity, TreeFingerprint};
 use crate::{
     CacheCandidate, CacheScope, DiscoveredCache, DiscoveryEvent, DiscoveryOptions, Error,
@@ -29,25 +29,25 @@ struct RawCandidate {
 /// Discover and size every matching cache.
 pub fn discover(options: &DiscoveryOptions) -> Result<ScanReport, Error> {
     validate_kinds(&options.kinds)?;
+    let roots = canonical_project_roots(options)?;
     let wanted: HashSet<&str> = options.kinds.iter().map(String::as_str).collect();
     let wants_kind = |kind: &str| wanted.is_empty() || wanted.contains(kind);
+    let globals = if options.scope.includes(CacheScope::Global) {
+        global_paths()
+    } else {
+        Vec::new()
+    };
     let mut raw = Vec::new();
     let mut warnings = Vec::new();
 
     if options.scope.includes(CacheScope::Project) {
-        for root in &options.roots {
-            let canonical = root
-                .canonicalize()
-                .map_err(|_| Error::InvalidPath { path: root.clone() })?;
-            if !canonical.is_dir() {
-                return Err(Error::InvalidPath { path: root.clone() });
-            }
-            scan_project_root(&canonical, &wants_kind, &mut raw, &mut warnings);
+        for root in &roots {
+            scan_project_root(root, &wants_kind, &mut raw, &mut warnings);
         }
     }
 
     if options.scope.includes(CacheScope::Global) {
-        for global in global_paths() {
+        for global in globals {
             if !wants_kind(global.kind) {
                 continue;
             }
@@ -108,17 +108,50 @@ pub fn discover_with_progress<F>(
 where
     F: Fn(DiscoveryEvent) + Sync,
 {
+    discover_with_progress_prioritized(options, &[], progress)
+}
+
+/// Discover caches while measuring previously known paths first.
+///
+/// Priority paths are untrusted scheduling hints. Every path is recognized
+/// against the current catalog, constrained to the requested roots and scope,
+/// and measured normally before it appears in the returned report.
+pub fn discover_with_progress_prioritized<F>(
+    options: &DiscoveryOptions,
+    priority_paths: &[PathBuf],
+    progress: F,
+) -> Result<ScanReport, Error>
+where
+    F: Fn(DiscoveryEvent) + Sync,
+{
+    discover_with_progress_with_limit(options, priority_paths, measurement_task_limit(), progress)
+}
+
+fn discover_with_progress_with_limit<F>(
+    options: &DiscoveryOptions,
+    priority_paths: &[PathBuf],
+    task_limit: usize,
+    progress: F,
+) -> Result<ScanReport, Error>
+where
+    F: Fn(DiscoveryEvent) + Sync,
+{
     validate_kinds(&options.kinds)?;
     let roots = canonical_project_roots(options)?;
     let wanted: HashSet<&str> = options.kinds.iter().map(String::as_str).collect();
     let wants_kind = |kind: &str| wanted.is_empty() || wanted.contains(kind);
+    let globals = if options.scope.includes(CacheScope::Global) {
+        global_paths()
+    } else {
+        Vec::new()
+    };
     let mut warnings = Vec::new();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     let candidates = Mutex::new(Vec::new());
     let mut seen = HashSet::new();
-    let task_limit = rayon::current_num_threads().max(1) * 2;
+    let task_limit = task_limit.max(1);
     let (token_tx, token_rx) = mpsc::sync_channel(task_limit);
     let token_rx = Mutex::new(token_rx);
     for _ in 0..task_limit {
@@ -163,12 +196,16 @@ where
             warnings.push(warning);
         };
 
-        for root in &roots {
-            scan_project_root_progressive(root, &wants_kind, &mut dispatch, &mut warn);
+        for path in priority_paths {
+            if let Some(raw) =
+                prioritized_candidate(path, &roots, &globals, options.scope, &wants_kind)
+            {
+                dispatch(raw);
+            }
         }
 
         if options.scope.includes(CacheScope::Global) {
-            for global in global_paths() {
+            for global in globals {
                 if !wants_kind(global.kind) {
                     continue;
                 }
@@ -195,6 +232,10 @@ where
                 });
             }
         }
+
+        for root in &roots {
+            scan_project_root_progressive(root, &wants_kind, &mut dispatch, &mut warn);
+        }
     });
 
     let mut candidates = candidates
@@ -212,7 +253,7 @@ fn canonical_project_roots(options: &DiscoveryOptions) -> Result<Vec<PathBuf>, E
     if !options.scope.includes(CacheScope::Project) {
         return Ok(Vec::new());
     }
-    options
+    let mut roots: Vec<PathBuf> = options
         .roots
         .iter()
         .map(|root| {
@@ -224,7 +265,80 @@ fn canonical_project_roots(options: &DiscoveryOptions) -> Result<Vec<PathBuf>, E
             }
             Ok(canonical)
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    roots.sort();
+    roots.dedup();
+    let mut collapsed: Vec<PathBuf> = Vec::with_capacity(roots.len());
+    for root in roots {
+        if !collapsed.iter().any(|parent| root.starts_with(parent)) {
+            collapsed.push(root);
+        }
+    }
+    Ok(collapsed)
+}
+
+fn measurement_task_limit() -> usize {
+    rayon::current_num_threads().saturating_mul(2).clamp(2, 32)
+}
+
+fn prioritized_candidate<F>(
+    path: &Path,
+    roots: &[PathBuf],
+    globals: &[GlobalPath],
+    scope: crate::ScopeFilter,
+    wants_kind: &F,
+) -> Option<RawCandidate>
+where
+    F: Fn(&str) -> bool,
+{
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+
+    if scope.includes(CacheScope::Global)
+        && let Some(global) = globals.iter().find(|global| global.path == path)
+        && wants_kind(global.kind)
+    {
+        let anchor = global
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| global.path.clone());
+        return Some(RawCandidate {
+            kind: global.kind.to_owned(),
+            ecosystem: global.ecosystem.to_owned(),
+            scope: CacheScope::Global,
+            path: global.path.clone(),
+            anchor,
+            network_restore: global.network_restore,
+            cleanable: global.cleanable,
+            minimum_bytes: global.minimum_bytes,
+        });
+    }
+
+    if !scope.includes(CacheScope::Project) {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    let anchor = roots
+        .iter()
+        .filter(|root| canonical != **root && canonical.starts_with(root))
+        .max_by_key(|root| root.components().count())?;
+    let found = identify_project_cache(&canonical)?;
+    if !wants_kind(found.kind) {
+        return None;
+    }
+    Some(RawCandidate {
+        kind: found.kind.to_owned(),
+        ecosystem: found.ecosystem.to_owned(),
+        scope: CacheScope::Project,
+        path: canonical,
+        anchor: anchor.clone(),
+        network_restore: found.network_restore,
+        cleanable: true,
+        minimum_bytes: 0,
+    })
 }
 
 fn discovered_cache(raw: &RawCandidate) -> DiscoveredCache {
@@ -668,23 +782,86 @@ mod tests {
         fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
         let discoveries = Mutex::new(0_usize);
 
-        let report = discover_with_progress(
+        let options = DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf(), project],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 7,
+        };
+        assert_eq!(canonical_project_roots(&options).unwrap().len(), 1);
+
+        let report = discover_with_progress(&options, |event| {
+            if matches!(event, DiscoveryEvent::Discovered(_)) {
+                *discoveries.lock().unwrap() += 1;
+            }
+        })
+        .unwrap();
+
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(discoveries.into_inner().unwrap(), 1);
+    }
+
+    #[test]
+    fn atomic_discovery_also_collapses_overlapping_roots() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("demo");
+        fs::create_dir_all(project.join("target")).unwrap();
+        fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+
+        let report = discover(&DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf(), project],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 7,
+        })
+        .unwrap();
+
+        assert_eq!(report.candidates.len(), 1);
+    }
+
+    #[test]
+    fn remembered_paths_are_measured_before_the_project_crawl() {
+        let temp = tempdir().unwrap();
+        let first_project = temp.path().join("alpha");
+        let first_target = first_project.join("target");
+        let priority_project = temp.path().join("zulu");
+        let priority_target = priority_project.join("target");
+        for (project, target) in [
+            (&first_project, &first_target),
+            (&priority_project, &priority_target),
+        ] {
+            fs::create_dir_all(target).unwrap();
+            fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+            fs::write(target.join("artifact"), [0_u8; 32]).unwrap();
+        }
+        let discoveries = Mutex::new(Vec::new());
+
+        let report = discover_with_progress_prioritized(
             &DiscoveryOptions {
-                roots: vec![temp.path().to_path_buf(), project],
+                roots: vec![temp.path().to_path_buf()],
                 scope: ScopeFilter::Project,
                 kinds: Vec::new(),
                 protect_days: 7,
             },
+            &[priority_target.clone(), PathBuf::from("/outside/untrusted")],
             |event| {
-                if matches!(event, DiscoveryEvent::Discovered(_)) {
-                    *discoveries.lock().unwrap() += 1;
+                if let DiscoveryEvent::Discovered(cache) = event {
+                    discoveries.lock().unwrap().push(cache.path);
                 }
             },
         )
         .unwrap();
 
-        assert_eq!(report.candidates.len(), 1);
-        assert_eq!(discoveries.into_inner().unwrap(), 1);
+        assert_eq!(report.candidates.len(), 2);
+        assert_eq!(
+            discoveries.lock().unwrap().first(),
+            Some(&priority_target.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn progressive_measurement_pool_is_adaptive_and_bounded() {
+        assert!((2..=32).contains(&measurement_task_limit()));
     }
 
     #[test]

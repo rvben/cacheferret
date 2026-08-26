@@ -35,6 +35,7 @@ fn tui_enters_draws_and_restores_the_terminal() {
     command.env("TERM", "xterm-256color");
     command.env("LANG", "C.UTF-8");
     command.env("CACHEFERRET_REDUCE_MOTION", "1");
+    command.env("CACHEFERRET_NO_CACHE", "1");
 
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);

@@ -18,7 +18,9 @@ pub use model::{
     CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveredCache,
     DiscoveryEvent, DiscoveryOptions, FilesystemSpaceDelta, OutputFormat, ScanReport, ScopeFilter,
 };
-pub use scanner::{discover, discover_with_progress, refresh_candidate};
+pub use scanner::{
+    discover, discover_with_progress, discover_with_progress_prioritized, refresh_candidate,
+};
 
 /// Render a byte count compactly for terminal output.
 pub fn format_bytes(bytes: u64) -> String {
