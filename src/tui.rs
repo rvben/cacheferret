@@ -1597,25 +1597,25 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
             palette,
         ));
         if let Some(previous) = remembered {
-            lines.extend([
-                labeled(
-                    "Apparent",
-                    format!(
-                        "~{} from {}",
-                        format_bytes(previous.bytes),
-                        previous.observed_age()
-                    ),
-                    palette,
+            lines.push(labeled(
+                "Apparent",
+                format!(
+                    "~{} from {}",
+                    format_bytes(previous.bytes),
+                    previous.observed_age()
                 ),
-                labeled(
+                palette,
+            ));
+            if area.height >= 10 {
+                lines.push(labeled(
                     "Allocated",
                     format!(
                         "~{} from previous scan",
                         format_bytes(previous.allocated_bytes)
                     ),
                     palette,
-                ),
-            ]);
+                ));
+            }
         }
         lines.extend([
             labeled(
@@ -2577,6 +2577,10 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("from moments ago"), "{output}");
+        assert!(
+            output.contains("Available when measurement finishes"),
+            "{output}"
+        );
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
