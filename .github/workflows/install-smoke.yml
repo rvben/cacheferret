@@ -1,0 +1,161 @@
+name: Public install smoke tests
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released version to verify (for example, 0.4.2)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-version:
+    name: Resolve released version
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Validate released version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          value="${REQUESTED_VERSION:-$RELEASE_REF}"
+          version="${value#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a stable semantic version, got: $value" >&2
+            exit 1
+          fi
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  install-smoke:
+    name: Install smoke (${{ matrix.target }})
+    needs: resolve-version
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      CACHEFERRET_TAG: ${{ needs.resolve-version.outputs.tag }}
+      CACHEFERRET_VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+      # Pinned to Homebrew/actions main on 2026-08-26.
+      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
+
+      - name: Install GitHub release archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          archive_dir="$RUNNER_TEMP/github-release"
+          mkdir -p "$archive_dir/unpacked"
+          gh release download "$CACHEFERRET_TAG" \
+            --repo rvben/cacheferret \
+            --pattern "cacheferret-${CACHEFERRET_TAG}-${RELEASE_TARGET}.tar.gz*" \
+            --dir "$archive_dir"
+          cd "$archive_dir"
+          checksum="cacheferret-${CACHEFERRET_TAG}-${RELEASE_TARGET}.tar.gz.sha256"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 -c "$checksum"
+          else
+            sha256sum -c "$checksum"
+          fi
+          tar -xzf "cacheferret-${CACHEFERRET_TAG}-${RELEASE_TARGET}.tar.gz" \
+            -C "$archive_dir/unpacked"
+          binary="$archive_dir/unpacked/cacheferret"
+          test "$("$binary" --version)" = "cacheferret $CACHEFERRET_VERSION"
+          "$binary" schema | jq -e '.clispec == "0.3"' >/dev/null
+
+      - name: Install from crates.io
+        shell: bash
+        run: |
+          cargo_root="$RUNNER_TEMP/cargo-install"
+          cargo install cacheferret \
+            --version "=$CACHEFERRET_VERSION" \
+            --locked \
+            --root "$cargo_root"
+          binary="$cargo_root/bin/cacheferret"
+          test "$("$binary" --version)" = "cacheferret $CACHEFERRET_VERSION"
+          "$binary" schema | jq -e '.clispec == "0.3"' >/dev/null
+
+      - name: Install from PyPI
+        shell: bash
+        run: |
+          venv="$RUNNER_TEMP/pypi-install"
+          python -m venv "$venv"
+          for attempt in 1 2 3 4 5 6; do
+            if "$venv/bin/python" -m pip install \
+              --disable-pip-version-check \
+              --no-cache-dir \
+              --only-binary=:all: \
+              "cacheferret==$CACHEFERRET_VERSION"; then
+              break
+            fi
+            if [[ "$attempt" == 6 ]]; then
+              echo "PyPI wheel was still unavailable after six attempts" >&2
+              exit 1
+            fi
+            sleep 20
+          done
+          binary="$venv/bin/cacheferret"
+          test "$("$binary" --version)" = "cacheferret $CACHEFERRET_VERSION"
+          "$binary" schema | jq -e '.clispec == "0.3"' >/dev/null
+
+      - name: Install from Homebrew
+        shell: bash
+        run: |
+          brew tap rvben/tap
+          brew install rvben/tap/cacheferret
+          binary="$(brew --prefix cacheferret)/bin/cacheferret"
+          test "$("$binary" --version)" = "cacheferret $CACHEFERRET_VERSION"
+          "$binary" schema | jq -e '.clispec == "0.3"' >/dev/null
+          brew test rvben/tap/cacheferret
+
+  all-installs-passed:
+    name: All public installs passed
+    needs: install-smoke
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every install channel and platform
+        env:
+          RESULT: ${{ needs.install-smoke.result }}
+        run: |
+          if [[ "$RESULT" != "success" ]]; then
+            echo "At least one public install smoke test failed: $RESULT" >&2
+            exit 1
+          fi
+          echo "All public install smoke tests passed"

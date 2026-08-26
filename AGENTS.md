@@ -79,6 +79,8 @@ baseline includes:
 - `make check`: formatting, Clippy, packaging syntax, and the full test suite.
 - `make conformance`, Cargo package verification, and Maturin sdist/wheel builds.
 - strict Twine checks for all five Python artifacts.
+- post-release install smoke tests across GitHub archives, crates.io, PyPI, and
+  Homebrew on native Intel/ARM macOS and Linux runners.
 - final `vership verify` across the tag, GitHub release, crates.io, PyPI, and
   Homebrew.
 

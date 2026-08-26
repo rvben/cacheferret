@@ -34,10 +34,13 @@ Bootstrap the repository secrets with `clihatch secrets rvben/cacheferret
    `release-minor`, and `release-major` targets are aliases for this step.
 5. Watch every release job. Re-run only failed jobs with
    `gh run rerun <run-id> --failed`.
-6. Run `vership verify X.Y.Z`, then verify the GitHub checksums,
-   `cargo install cacheferret`,
-   `pipx install cacheferret`, and `brew install rvben/tap/cacheferret` on a
-   clean machine.
+6. Watch the `Public install smoke tests` workflow. It installs the exact
+   released version from GitHub archives, crates.io, PyPI wheels, and Homebrew
+   on native Intel/ARM macOS and Linux runners, checks archive hashes, executes
+   every installed binary, and validates its schema.
+7. Run `vership verify X.Y.Z` and independently inspect the GitHub release asset
+   and checksum list. The install workflow can also be dispatched manually for
+   the version currently exposed by all four distribution channels.
 
 Use `vership bump patch --no-push` only when the release must remain local to
 the source checkout. In that mode, publish the validated crate and Python
