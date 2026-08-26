@@ -6,6 +6,14 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Post-release smoke tests now install and execute the exact published version
+  from GitHub archives, crates.io, PyPI, and Homebrew on native Intel/ARM macOS
+  and Linux runners.
+- A native cleanup adapter contract now defines when daemon and package-manager
+  pruning is safer than direct directory deletion, beginning with Docker.
+
 ## [0.4.2](https://github.com/rvben/cacheferret/compare/v0.4.1...v0.4.2) - 2026-08-26
 
 ### Changed

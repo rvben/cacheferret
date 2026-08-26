@@ -5,6 +5,7 @@
 # CacheFerret
 
 [![CI](https://github.com/rvben/cacheferret/actions/workflows/ci.yml/badge.svg)](https://github.com/rvben/cacheferret/actions/workflows/ci.yml)
+[![public installs](https://github.com/rvben/cacheferret/actions/workflows/install-smoke.yml/badge.svg)](https://github.com/rvben/cacheferret/actions/workflows/install-smoke.yml)
 [![crates.io](https://img.shields.io/crates/v/cacheferret.svg)](https://crates.io/crates/cacheferret)
 [![clispec](https://img.shields.io/badge/clispec-v0.3-3b82f6)](https://clispec.dev)
 
@@ -155,7 +156,9 @@ release covers:
 
 Docker build data is intentionally not treated as a directory cache. It needs a
 separate native `docker builder prune` integration with Docker-aware sizing and
-is planned as a follow-up.
+is planned as a follow-up. The bounded adapter contract and the native cleanup
+opportunities for other package managers are documented in
+[docs/native-cleanup.md](docs/native-cleanup.md).
 
 The Maven local repository is scan-only because it may contain unpublished
 locally installed artifacts. The shared renv cache is scan-only because project

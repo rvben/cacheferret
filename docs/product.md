@@ -152,9 +152,11 @@ rather than inferred from a successful build.
 
 ## Near-term opportunities
 
-- Exercise release installs on clean Intel/ARM macOS and Linux environments.
+- Keep the post-release public-install smoke matrix green across Intel/ARM
+  macOS and Linux for GitHub archives, crates.io, PyPI, and Homebrew.
 - Continue polishing navigation, focus continuity, responsive layouts, copy,
   and visual identity based on real terminal use.
-- Design Docker cleanup as an explicit integration instead of weakening the
-  closed cache catalog.
+- Implement the [native cleanup adapter design](native-cleanup.md), beginning
+  with read-only Docker storage inspection instead of weakening the closed
+  directory catalog.
 - Consider Windows only as a complete platform effort, not just an extra wheel.
