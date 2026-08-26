@@ -132,9 +132,11 @@ for automation. At minimum:
 
 ## Current distribution
 
-Version 0.2.1 is published on
-[crates.io](https://crates.io/crates/cacheferret/0.2.1) and
-[PyPI](https://pypi.org/project/cacheferret/0.2.1/). Users can install it with:
+Version 0.4.1 is published on
+[crates.io](https://crates.io/crates/cacheferret),
+[PyPI](https://pypi.org/project/cacheferret/),
+[GitHub Releases](https://github.com/rvben/cacheferret/releases/latest), and the
+[Homebrew tap](https://github.com/rvben/homebrew-tap). Users can install it with:
 
 ```sh
 cargo install cacheferret
@@ -143,14 +145,13 @@ pipx install cacheferret
 
 PyPI packages the native Rust executable through Maturin. The current artifact
 matrix contains macOS and manylinux2014 wheels for Intel and ARM, plus an sdist.
-Homebrew and GitHub archive automation exist in the repository, but their public
-availability must be verified separately rather than inferred from the workflow
-files.
+Tag-driven publication fails before building when any registry or Homebrew
+credential is absent. Release readiness is checked locally by Vership and again
+inside GitHub Actions; public availability is still verified after publication
+rather than inferred from a successful build.
 
 ## Near-term opportunities
 
-- Publish and verify the GitHub source repository, tag, release archives, and
-  Homebrew tap when explicitly authorized and correctly credentialed.
 - Exercise release installs on clean Intel/ARM macOS and Linux environments.
 - Continue polishing navigation, focus continuity, responsive layouts, copy,
   and visual identity based on real terminal use.

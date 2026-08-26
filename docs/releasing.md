@@ -12,6 +12,10 @@ GitHub archives, checksums, and the Homebrew tap from a single
 - The GitHub repository allows Actions to create releases.
 - `main` is clean and CI is green.
 
+Tag-driven workflows fail closed before building if a publishing credential is
+missing. Vership runs the same secret-name check through its `pre-bump` hook, so
+an incomplete release is refused before the version commit or tag is created.
+
 Bootstrap the repository secrets with `clihatch secrets rvben/cacheferret
 --dry-run`, inspect the proposed changes, then run the command without
 `--dry-run`.
@@ -19,11 +23,13 @@ Bootstrap the repository secrets with `clihatch secrets rvben/cacheferret
 ## Release checklist
 
 1. Put user-visible changes under the appropriate headings in `Unreleased`.
-2. Preview the release with `vership bump patch --dry-run` (or `minor`/`major`).
+2. Run `make release-readiness`, then preview the release with
+   `vership bump patch --dry-run` (or `minor`/`major`).
 3. Run `vership preflight`, `make conformance`, `cargo package --locked`, and
    `maturin build --release --locked --sdist`.
 4. Run `vership bump patch`. Vership synchronizes the Cargo and Maturin version,
-   promotes `Unreleased`, runs its checks, creates the Conventional Commit and
+   updates configured documentation version references, promotes `Unreleased`,
+   runs its checks and pre-bump secret gate, creates the Conventional Commit and
    annotated tag, and pushes `main` plus the tag. The `make release-patch`,
    `release-minor`, and `release-major` targets are aliases for this step.
 5. Watch every release job. Re-run only failed jobs with

@@ -56,29 +56,27 @@ be selectable or deletable.
 
 ## Current release state
 
-- Current version: `0.3.1`, released 2026-08-26.
-- Published to crates.io: <https://crates.io/crates/cacheferret/0.3.1>
-- Published to PyPI: <https://pypi.org/project/cacheferret/0.3.1/>
+- Current version: `0.4.1`.
+- Published to crates.io: <https://crates.io/crates/cacheferret>
+- Published to PyPI: <https://pypi.org/project/cacheferret/>
 - PyPI provides native x86_64/aarch64 wheels for macOS and manylinux2014 Linux,
   plus an sdist. Windows is not currently a supported wheel target.
-- Vership verification confirms `v0.3.1`, the GitHub release, crates.io, PyPI,
-  and Homebrew; PyPI exposes all five expected artifacts.
-- Vership created release commit `169da2c` and annotated tag `v0.3.1`.
+- Vership verification confirms the current tag, GitHub release, crates.io,
+  PyPI, and Homebrew; PyPI exposes all five expected artifacts.
 - Source, tags, release archives, and checksums are public at
-  <https://github.com/rvben/cacheferret/releases/tag/v0.3.1>.
-- `v0.3.0` remains published on GitHub and crates.io. Its PyPI sdist workflow
-  failed before upload; `v0.3.1` is the corrected patch release.
+  <https://github.com/rvben/cacheferret/releases/latest>.
+- Tag-driven release workflows fail closed when a required publishing secret is
+  missing; Vership checks the configured secret names before creating a tag.
 - Never copy local Cargo or PyPI credentials into GitHub secrets without the
   user's explicit authorization. Registry publishing can be performed locally;
-  release workflows skip their registry/Homebrew steps when the corresponding
-  repository secret is absent.
+  releases must stop rather than silently skipping that publishing target.
 
 ## Release and quality baseline
 
-Before release, run the documented checklist in `docs/releasing.md`. The 0.3.1
-baseline passed:
+Before release, run the documented checklist in `docs/releasing.md`. The current
+baseline includes:
 
-- `make check`: formatting, Clippy, packaging syntax, and 42 tests.
+- `make check`: formatting, Clippy, packaging syntax, and the full test suite.
 - `make conformance`, Cargo package verification, and Maturin sdist/wheel builds.
 - strict Twine checks for all five Python artifacts.
 - final `vership verify` across the tag, GitHub release, crates.io, PyPI, and
