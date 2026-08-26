@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use cacheferret::{
     CacheCandidate, CacheScope, CleanReport, DiscoveryOptions, Error, ScanReport, ScopeFilter,
-    clean_candidates, discover, format_bytes, refresh_candidate,
+    clean_candidates, discover, format_bytes, format_signed_bytes, refresh_candidate,
 };
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -619,19 +619,23 @@ fn batch_risk_reasons(candidates: &[CacheCandidate]) -> Vec<&'static str> {
 fn cleanup_message(report: &CleanReport) -> String {
     if report.cleaned == 1 {
         let mut message = format!(
-            "Deleted cache · {} scanned size removed",
-            format_bytes(report.bytes_reclaimed_estimate)
+            "Deleted cache · {} apparent · {} allocated",
+            format_bytes(report.apparent_bytes_removed),
+            format_bytes(report.allocated_bytes_removed_estimate)
         );
+        append_observed_delta(&mut message, report);
         if report.skipped > 0 {
             message.push_str(&format!(" · {} skipped", report.skipped));
         }
         message
     } else if report.cleaned > 1 {
         let mut message = format!(
-            "Deleted {} caches · {} scanned size removed",
+            "Deleted {} caches · {} apparent · {} allocated",
             report.cleaned,
-            format_bytes(report.bytes_reclaimed_estimate)
+            format_bytes(report.apparent_bytes_removed),
+            format_bytes(report.allocated_bytes_removed_estimate)
         );
+        append_observed_delta(&mut message, report);
         if report.skipped > 0 {
             message.push_str(&format!(" · {} skipped", report.skipped));
         }
@@ -644,6 +648,19 @@ fn cleanup_message(report: &CleanReport) -> String {
         }
     } else {
         "Nothing was deleted".to_owned()
+    }
+}
+
+fn append_observed_delta(message: &mut String, report: &CleanReport) {
+    if let Some(delta) = report.observed_free_bytes_delta() {
+        message.push_str(&format!(" · {} disk free net", format_signed_bytes(delta)));
+    } else if report.filesystem_deltas.len() > 1 {
+        message.push_str(&format!(
+            " · {} filesystem deltas measured",
+            report.filesystem_deltas.len()
+        ));
+    } else {
+        message.push_str(" · disk-free change unavailable");
     }
 }
 
@@ -908,7 +925,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             )
         };
         format!(
-            "{} caches  {}  {} discovered{}",
+            "{} caches  {}  {} apparent{}",
             app.candidates.len(),
             app.ui.separator().trim(),
             format_bytes(total_bytes),
@@ -1077,7 +1094,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     let (headers, widths) = if compact {
         (
-            vec!["", "SIZE", "KIND", "PATH"],
+            vec!["", "APPARENT", "KIND", "PATH"],
             vec![
                 Constraint::Length(2),
                 Constraint::Length(9),
@@ -1087,7 +1104,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         )
     } else if medium {
         (
-            vec!["", "SIZE", "KIND", "AGE", "PATH"],
+            vec!["", "APPARENT", "KIND", "AGE", "PATH"],
             vec![
                 Constraint::Length(2),
                 Constraint::Length(10),
@@ -1098,7 +1115,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         )
     } else {
         (
-            vec!["", "SIZE", "KIND", "AGE", "SCOPE", "PATH"],
+            vec!["", "APPARENT", "KIND", "AGE", "SCOPE", "PATH"],
             vec![
                 Constraint::Length(2),
                 Constraint::Length(10),
@@ -1208,10 +1225,19 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
     }
     lines.extend([
         labeled(
-            "Size",
+            "Apparent",
             format!(
                 "{}  {}  {percent}% of total",
                 format_bytes(candidate.bytes),
+                app.ui.separator().trim()
+            ),
+            palette,
+        ),
+        labeled(
+            "Allocated",
+            format!(
+                "{}  {}  shared or cloned blocks may remain",
+                format_bytes(candidate.allocated_bytes),
                 app.ui.separator().trim()
             ),
             palette,
@@ -1514,6 +1540,11 @@ fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|candidate| candidate.bytes)
         .sum();
+    let allocated_bytes: u64 = app
+        .pending_delete
+        .iter()
+        .map(|candidate| candidate.allocated_bytes)
+        .sum();
     let count = app.pending_delete.len();
     let (question, subject) = if count == 1 {
         let candidate = &app.pending_delete[0];
@@ -1545,7 +1576,12 @@ fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(""),
             Line::from(vec![
                 Span::styled(
-                    format_bytes(bytes),
+                    format!(
+                        "{} apparent  {}  {} allocated",
+                        format_bytes(bytes),
+                        app.ui.separator().trim(),
+                        format_bytes(allocated_bytes)
+                    ),
                     Style::default()
                         .fg(palette.accent)
                         .add_modifier(Modifier::BOLD),

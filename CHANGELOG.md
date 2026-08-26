@@ -6,6 +6,19 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Allocated-block estimates alongside apparent directory sizes in scans,
+  confirmations, dry runs, cleanup summaries, TUI details, and JSON output.
+- Per-filesystem before/after free-space measurements for completed cleanups,
+  including signed net deltas and explicit multi-filesystem reporting.
+
+### Changed
+
+- Hard-linked files are counted once during tree measurement.
+- Storage copy now distinguishes apparent size, allocated-block estimates, and
+  observed disk-free changes without claiming APFS shared blocks were reclaimed.
+
 ## [0.3.1](https://github.com/rvben/cacheferret/compare/v0.3.0...v0.3.1) - 2026-08-25
 
 ### Fixed

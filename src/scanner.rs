@@ -192,6 +192,7 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
         scope: raw.scope,
         path: raw.path,
         bytes: measurement.bytes,
+        allocated_bytes: measurement.allocated_bytes,
         modified_unix,
         age_days,
         protected,
@@ -205,14 +206,18 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
 
 struct TreeMeasurement {
     bytes: u64,
+    allocated_bytes: u64,
     modified_unix: Option<u64>,
     fingerprint: TreeFingerprint,
 }
 
 fn measure_tree(root: &Path) -> TreeMeasurement {
     let mut bytes = 0_u64;
+    let mut allocated_bytes = 0_u64;
     let mut entries = 0_u64;
     let mut latest_modified_nanos = None;
+    #[cfg(unix)]
+    let mut seen_files = HashSet::new();
     for entry in WalkDir::new(root).follow_links(false).into_iter().flatten() {
         let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
             continue;
@@ -222,7 +227,27 @@ fn measure_tree(root: &Path) -> TreeMeasurement {
         }
         entries = entries.saturating_add(1);
         if metadata.is_file() {
-            bytes = bytes.saturating_add(metadata.len());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if seen_files.insert((metadata.dev(), metadata.ino())) {
+                    bytes = bytes.saturating_add(metadata.len());
+                    allocated_bytes =
+                        allocated_bytes.saturating_add(metadata.blocks().saturating_mul(512));
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                bytes = bytes.saturating_add(metadata.len());
+                allocated_bytes = allocated_bytes.saturating_add(metadata.len());
+            }
+        } else if metadata.is_dir() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                allocated_bytes =
+                    allocated_bytes.saturating_add(metadata.blocks().saturating_mul(512));
+            }
         }
         if let Ok(modified) = metadata.modified()
             && let Ok(since_epoch) = modified.duration_since(UNIX_EPOCH)
@@ -236,9 +261,11 @@ fn measure_tree(root: &Path) -> TreeMeasurement {
     }
     TreeMeasurement {
         bytes,
+        allocated_bytes,
         modified_unix: latest_modified_nanos.map(|nanos| (nanos / 1_000_000_000) as u64),
         fingerprint: TreeFingerprint {
             bytes,
+            allocated_bytes,
             entries,
             latest_modified_nanos,
         },
@@ -267,6 +294,7 @@ pub fn refresh_candidate(
 
     let mut refreshed = candidate.clone();
     refreshed.bytes = bytes;
+    refreshed.allocated_bytes = measurement.allocated_bytes;
     refreshed.modified_unix = modified_unix;
     refreshed.age_days = age_days;
     refreshed.protected = age_days.is_none_or(|days| days < protect_days);
@@ -385,6 +413,32 @@ mod tests {
         assert_eq!(report.candidates.len(), 1);
         assert_eq!(report.candidates[0].kind, "cargo-target");
         assert_eq!(report.candidates[0].bytes, 32);
+        assert!(report.candidates[0].allocated_bytes >= 32);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_links_are_counted_once_in_tree_sizes() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("demo");
+        fs::create_dir_all(project.join("target")).unwrap();
+        fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        fs::write(project.join("target/object"), [0_u8; 128]).unwrap();
+        fs::hard_link(
+            project.join("target/object"),
+            project.join("target/object-link"),
+        )
+        .unwrap();
+
+        let report = discover(&DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 0,
+        })
+        .unwrap();
+
+        assert_eq!(report.candidates[0].bytes, 128);
     }
 
     #[test]
@@ -562,6 +616,7 @@ mod tests {
             scope: CacheScope::Global,
             path: target.clone(),
             bytes: measurement.bytes,
+            allocated_bytes: measurement.allocated_bytes,
             modified_unix: measurement.modified_unix,
             age_days: Some(0),
             protected: true,

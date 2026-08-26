@@ -50,6 +50,9 @@ pub struct CacheCandidate {
     pub scope: CacheScope,
     pub path: PathBuf,
     pub bytes: u64,
+    /// Filesystem blocks attributed to this tree. Shared clone blocks may make
+    /// this larger than the space a deletion can actually reclaim.
+    pub allocated_bytes: u64,
     pub modified_unix: Option<u64>,
     pub age_days: Option<u64>,
     pub protected: bool,
@@ -78,6 +81,7 @@ pub(crate) struct FileIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TreeFingerprint {
     pub bytes: u64,
+    pub allocated_bytes: u64,
     pub entries: u64,
     pub latest_modified_nanos: Option<u128>,
 }
@@ -94,6 +98,13 @@ impl ScanReport {
         self.candidates
             .iter()
             .map(|candidate| candidate.bytes)
+            .sum()
+    }
+
+    pub fn total_allocated_bytes(&self) -> u64 {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.allocated_bytes)
             .sum()
     }
 }
@@ -121,8 +132,17 @@ pub struct CleanReport {
     pub protected_skipped: usize,
     pub policy_skipped: usize,
     pub network_restore_selected: usize,
+    /// Legacy alias for `apparent_bytes_selected`.
     pub bytes_selected: u64,
+    pub apparent_bytes_selected: u64,
+    pub allocated_bytes_selected: u64,
+    /// Legacy alias for `apparent_bytes_removed`.
     pub bytes_reclaimed_estimate: u64,
+    pub apparent_bytes_removed: u64,
+    pub allocated_bytes_removed_estimate: u64,
+    /// Free-space changes observed around deletion, kept per filesystem to
+    /// avoid double-counting storage pools shared by multiple volumes.
+    pub filesystem_deltas: Vec<FilesystemSpaceDelta>,
     pub selected_targets: Vec<CleanTarget>,
     pub cleaned_paths: Vec<PathBuf>,
     pub skipped_paths: Vec<SkippedPath>,
@@ -134,6 +154,7 @@ pub struct CleanTarget {
     pub kind: String,
     pub path: PathBuf,
     pub bytes: u64,
+    pub allocated_bytes: u64,
     pub network_restore: bool,
 }
 
@@ -143,8 +164,27 @@ impl From<&CacheCandidate> for CleanTarget {
             kind: candidate.kind.clone(),
             path: candidate.path.clone(),
             bytes: candidate.bytes,
+            allocated_bytes: candidate.allocated_bytes,
             network_restore: candidate.network_restore,
         }
+    }
+}
+
+/// An observed before/after free-space measurement for one filesystem.
+#[derive(Debug, Clone, Serialize)]
+pub struct FilesystemSpaceDelta {
+    pub probe_path: PathBuf,
+    pub free_bytes_before: u64,
+    pub free_bytes_after: u64,
+    pub delta_bytes: i64,
+}
+
+impl CleanReport {
+    /// Return a directly observable net change when cleanup touched exactly one
+    /// measured filesystem. Multiple deltas are intentionally not summed:
+    /// APFS volumes can share the same underlying storage pool.
+    pub fn observed_free_bytes_delta(&self) -> Option<i64> {
+        (self.filesystem_deltas.len() == 1).then(|| self.filesystem_deltas[0].delta_bytes)
     }
 }
 

@@ -16,7 +16,7 @@ pub use cleaner::clean_candidates;
 pub use error::Error;
 pub use model::{
     CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveryOptions,
-    OutputFormat, ScanReport, ScopeFilter,
+    FilesystemSpaceDelta, OutputFormat, ScanReport, ScopeFilter,
 };
 pub use scanner::{discover, refresh_candidate};
 
@@ -33,5 +33,14 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Render a signed byte delta, including an explicit sign for positive values.
+pub fn format_signed_bytes(bytes: i64) -> String {
+    if bytes >= 0 {
+        format!("+{}", format_bytes(bytes as u64))
+    } else {
+        format!("-{}", format_bytes(bytes.unsigned_abs()))
     }
 }

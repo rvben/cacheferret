@@ -72,7 +72,24 @@ pub fn contract() -> Value {
                     {"name": "policy_skipped", "type": "integer"},
                     {"name": "network_restore_selected", "type": "integer"},
                     {"name": "bytes_selected", "type": "integer"},
+                    {"name": "apparent_bytes_selected", "type": "integer"},
+                    {"name": "allocated_bytes_selected", "type": "integer"},
                     {"name": "bytes_reclaimed_estimate", "type": "integer"},
+                    {"name": "apparent_bytes_removed", "type": "integer"},
+                    {"name": "allocated_bytes_removed_estimate", "type": "integer"},
+                    {
+                        "name": "filesystem_deltas",
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "fields": [
+                                {"name": "probe_path", "type": "string"},
+                                {"name": "free_bytes_before", "type": "integer"},
+                                {"name": "free_bytes_after", "type": "integer"},
+                                {"name": "delta_bytes", "type": "integer"}
+                            ]
+                        }
+                    },
                     {
                         "name": "selected_targets",
                         "type": "array",
@@ -82,6 +99,7 @@ pub fn contract() -> Value {
                                 {"name": "kind", "type": "string"},
                                 {"name": "path", "type": "string"},
                                 {"name": "bytes", "type": "integer"},
+                                {"name": "allocated_bytes", "type": "integer"},
                                 {"name": "network_restore", "type": "boolean"}
                             ]
                         }
@@ -241,6 +259,7 @@ fn candidate_fields() -> Vec<Value> {
         json!({"name": "scope", "type": "string", "enum": ["project", "global"]}),
         json!({"name": "path", "type": "string"}),
         json!({"name": "bytes", "type": "integer"}),
+        json!({"name": "allocated_bytes", "type": "integer"}),
         json!({"name": "modified_unix", "type": "integer", "nullable": true}),
         json!({"name": "age_days", "type": "integer", "nullable": true}),
         json!({"name": "protected", "type": "boolean"}),

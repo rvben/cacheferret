@@ -53,6 +53,15 @@ on the current filtered/scope view. Background work must remain visible and
 must not freeze input. Empty, filtered-empty, scanning, deleting, success,
 conflict, and failure states all deserve intentional copy and layout.
 
+Storage accounting must distinguish three concepts throughout the TUI, text,
+and JSON interfaces: logical/apparent file length, filesystem blocks allocated
+to the tree, and the observed net change in available filesystem space after a
+real deletion. Hard links are counted once. Allocated blocks are not presented
+as guaranteed reclaimable space because APFS clones can share extents. Observed
+free-space changes stay separate per filesystem rather than being summed across
+volumes that may share an APFS container, and the interface explains that other
+disk activity, snapshots, and delayed reclamation can affect the result.
+
 ## Proportional confirmation
 
 Deletion must remain direct. With a selection, `d` reviews and deletes the

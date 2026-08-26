@@ -102,6 +102,8 @@ fn scan_emits_paginated_json_when_piped() {
     assert_eq!(value["total"], 1);
     assert_eq!(value["items"][0]["kind"], "cargo-target");
     assert_eq!(value["items"][0]["bytes"], 64);
+    assert!(value["items"][0]["allocated_bytes"].as_u64().unwrap() >= 64);
+    assert!(value["total_allocated_bytes"].as_u64().unwrap() >= 64);
     assert_eq!(value["truncated"], false);
 }
 
@@ -168,6 +170,14 @@ fn dry_run_reports_without_deleting() {
     assert_eq!(value["selected"], 1);
     assert_eq!(value["selected_targets"][0]["kind"], "cargo-target");
     assert_eq!(value["selected_targets"][0]["bytes"], 64);
+    assert_eq!(value["apparent_bytes_selected"], 64);
+    assert!(value["allocated_bytes_selected"].as_u64().unwrap() >= 64);
+    assert!(
+        value["selected_targets"][0]["allocated_bytes"]
+            .as_u64()
+            .unwrap()
+            >= 64
+    );
     let expected_path = Path::new(&root).canonicalize().unwrap().join("demo/target");
     assert_eq!(
         value["selected_targets"][0]["path"],
@@ -184,6 +194,8 @@ fn confirmed_clean_removes_only_cache() {
     let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(value["changed"], true);
     assert_eq!(value["cleaned"], 1);
+    assert_eq!(value["apparent_bytes_removed"], 64);
+    assert!(value["filesystem_deltas"].is_array());
     assert!(!Path::new(&root).join("demo/target").exists());
     assert!(Path::new(&root).join("demo/Cargo.toml").exists());
 }

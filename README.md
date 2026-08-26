@@ -110,12 +110,26 @@ cacheferret scan --limit 20 --fields kind,path,bytes |
 - Temporary caches must remain unchanged between their final measurement and
   deletion. Active writers cause cleanup to stop with a conflict.
 - `--dry-run` follows the same discovery and eligibility policy without
-  deleting anything, and lists every selected path with its size and restore
-  requirements.
+  deleting anything, and lists every selected path with its apparent size,
+  allocated-block estimate, and restore requirements.
 
-Reclaimed bytes are an estimate based on the freshly measured directory size;
-filesystem free-space deltas can differ because of snapshots, compression,
-hard links, or concurrent writes.
+CacheFerret reports storage in three deliberately separate layers:
+
+- **Apparent bytes** are the logical file lengths, with hard links counted once.
+- **Allocated bytes** are the filesystem blocks attributed to the tree before
+  deletion. This is still only an upper-bound estimate on APFS because cloned
+  files can share those blocks with files outside the deleted tree.
+- **Observed disk-free change** is sampled immediately before and after a real
+  cleanup. It is the strongest available answer to “what did this cleanup free?”
+  but remains a net filesystem measurement, so concurrent writes, snapshots,
+  delayed reclamation, compression, and shared clone blocks can make it differ
+  from both size estimates—or even make it negative.
+
+JSON exposes the explicit `apparent_bytes_*`, `allocated_bytes_*`, and
+`filesystem_deltas` fields. Free-space deltas remain per filesystem and are not
+summed across volumes, because APFS volumes may share one underlying storage
+pool. The older `bytes_selected` and `bytes_reclaimed_estimate` fields remain as
+apparent-byte compatibility aliases.
 
 ## Supported caches
 

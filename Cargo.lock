@@ -161,6 +161,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "jsonschema",
+ "libc",
  "portable-pty",
  "ratatui",
  "rayon",

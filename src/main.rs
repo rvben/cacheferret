@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use cacheferret::{
     CacheCandidate, CleanReport, DiscoveryOptions, Error, OutputFormat, ScopeFilter,
-    clean_candidates, default_roots, discover, format_bytes, schema,
+    clean_candidates, default_roots, discover, format_bytes, format_signed_bytes, schema,
 };
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -296,6 +296,7 @@ fn run_scan(args: ScanArgs, format: OutputFormat) -> Result<String, Error> {
 
     let total = report.candidates.len();
     let total_bytes = report.total_bytes();
+    let total_allocated_bytes = report.total_allocated_bytes();
     let end = args.offset.saturating_add(args.limit).min(total);
     let page = if args.offset >= total {
         &[]
@@ -313,6 +314,7 @@ fn run_scan(args: ScanArgs, format: OutputFormat) -> Result<String, Error> {
                 "items": items,
                 "total": total,
                 "total_bytes": total_bytes,
+                "total_allocated_bytes": total_allocated_bytes,
                 "returned": page.len(),
                 "offset": args.offset,
                 "limit": args.limit,
@@ -321,9 +323,14 @@ fn run_scan(args: ScanArgs, format: OutputFormat) -> Result<String, Error> {
             })
             .to_string()
         }
-        OutputFormat::Text => {
-            render_scan_text(page, total, total_bytes, end < total, &report.warnings)
-        }
+        OutputFormat::Text => render_scan_text(
+            page,
+            total,
+            total_bytes,
+            total_allocated_bytes,
+            end < total,
+            &report.warnings,
+        ),
     })
 }
 
@@ -452,15 +459,20 @@ fn run_clean(args: CleanArgs, format: OutputFormat) -> Result<String, Error> {
 
 fn prompt_for_confirmation(candidates: &[CacheCandidate]) -> Result<bool, Error> {
     let bytes: u64 = candidates.iter().map(|candidate| candidate.bytes).sum();
+    let allocated_bytes: u64 = candidates
+        .iter()
+        .map(|candidate| candidate.allocated_bytes)
+        .sum();
     let downloads = candidates
         .iter()
         .filter(|candidate| candidate.network_restore)
         .count();
-    eprintln!("SIZE\tRESTORE\tKIND\tPATH");
+    eprintln!("APPARENT\tALLOCATED\tRESTORE\tKIND\tPATH");
     for candidate in candidates {
         eprintln!(
-            "{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}",
             format_bytes(candidate.bytes),
+            format_bytes(candidate.allocated_bytes),
             if candidate.network_restore {
                 "network"
             } else {
@@ -471,9 +483,10 @@ fn prompt_for_confirmation(candidates: &[CacheCandidate]) -> Result<bool, Error>
         );
     }
     eprint!(
-        "Clean {} cache directories ({})? {} require downloads to restore. [y/N] ",
+        "Clean {} cache directories ({} apparent, {} allocated)? {} require downloads to restore. [y/N] ",
         candidates.len(),
         format_bytes(bytes),
+        format_bytes(allocated_bytes),
         downloads
     );
     std::io::stderr().flush().map_err(|source| Error::Io {
@@ -497,19 +510,22 @@ fn render_scan_text(
     page: &[CacheCandidate],
     total: usize,
     total_bytes: u64,
+    total_allocated_bytes: u64,
     truncated: bool,
     warnings: &[String],
 ) -> String {
     let mut lines = vec![format!(
-        "Found {total} storage locations using {}{}",
+        "Found {total} storage locations using {} apparent ({} allocated){}",
         format_bytes(total_bytes),
+        format_bytes(total_allocated_bytes),
         if truncated { " (output truncated)" } else { "" }
     )];
-    lines.push("SIZE\tAGE\tSCOPE\tKIND\tPATH".to_owned());
+    lines.push("APPARENT\tALLOCATED\tAGE\tSCOPE\tKIND\tPATH".to_owned());
     lines.extend(page.iter().map(|candidate| {
         format!(
-            "{}\t{}\t{:?}\t{}\t{}{}",
+            "{}\t{}\t{}\t{:?}\t{}\t{}{}",
             format_bytes(candidate.bytes),
+            format_bytes(candidate.allocated_bytes),
             candidate
                 .age_days
                 .map_or_else(|| "?".to_owned(), |days| format!("{days}d")),
@@ -536,8 +552,8 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
             project_object(value, fields).to_string()
         }
         OutputFormat::Text => {
-            let summary = format!(
-                "{} {} of {} selected caches; {} protected; {} scan-only; estimated {} reclaimed{}",
+            let mut summary = format!(
+                "{} {} of {} selected caches; {} protected; {} scan-only; {} apparent, {} allocated{}",
                 if report.dry_run {
                     "Would clean"
                 } else {
@@ -554,7 +570,12 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
                 format_bytes(if report.dry_run {
                     report.bytes_selected
                 } else {
-                    report.bytes_reclaimed_estimate
+                    report.apparent_bytes_removed
+                }),
+                format_bytes(if report.dry_run {
+                    report.allocated_bytes_selected
+                } else {
+                    report.allocated_bytes_removed_estimate
                 }),
                 if report.skipped > 0 {
                     format!("; {} refused during final validation", report.skipped)
@@ -562,14 +583,47 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
                     String::new()
                 }
             );
+            if !report.dry_run {
+                match report.filesystem_deltas.as_slice() {
+                    [delta] => summary.push_str(&format!(
+                        "; observed disk-free change {} net",
+                        format_signed_bytes(delta.delta_bytes)
+                    )),
+                    deltas if !deltas.is_empty() => summary.push_str(&format!(
+                        "; observed disk-free changes on {} filesystems (reported separately in JSON)",
+                        deltas.len()
+                    )),
+                    _ => summary.push_str("; observed disk-free change unavailable"),
+                }
+            }
+            if !report.dry_run && report.filesystem_deltas.len() > 1 {
+                let mut lines = vec![
+                    summary,
+                    "NET_CHANGE\tFREE_BEFORE\tFREE_AFTER\tFILESYSTEM_PROBE".to_owned(),
+                ];
+                lines.extend(report.filesystem_deltas.iter().map(|delta| {
+                    format!(
+                        "{}\t{}\t{}\t{}",
+                        format_signed_bytes(delta.delta_bytes),
+                        format_bytes(delta.free_bytes_before),
+                        format_bytes(delta.free_bytes_after),
+                        delta.probe_path.display()
+                    )
+                }));
+                return lines.join("\n");
+            }
             if !report.dry_run || report.selected_targets.is_empty() {
                 return summary;
             }
-            let mut lines = vec![summary, "SIZE\tRESTORE\tKIND\tPATH".to_owned()];
+            let mut lines = vec![
+                summary,
+                "APPARENT\tALLOCATED\tRESTORE\tKIND\tPATH".to_owned(),
+            ];
             lines.extend(report.selected_targets.iter().map(|target| {
                 format!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     format_bytes(target.bytes),
+                    format_bytes(target.allocated_bytes),
                     if target.network_restore {
                         "network"
                     } else {
@@ -584,12 +638,13 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
     }
 }
 
-const CANDIDATE_FIELDS: [&str; 10] = [
+const CANDIDATE_FIELDS: [&str; 11] = [
     "kind",
     "ecosystem",
     "scope",
     "path",
     "bytes",
+    "allocated_bytes",
     "modified_unix",
     "age_days",
     "protected",
@@ -606,7 +661,7 @@ const CATALOG_FIELDS: [&str; 6] = [
     "cleanable",
 ];
 
-const CLEAN_FIELDS: [&str; 14] = [
+const CLEAN_FIELDS: [&str; 19] = [
     "changed",
     "dry_run",
     "confirmed",
@@ -617,7 +672,12 @@ const CLEAN_FIELDS: [&str; 14] = [
     "policy_skipped",
     "network_restore_selected",
     "bytes_selected",
+    "apparent_bytes_selected",
+    "allocated_bytes_selected",
     "bytes_reclaimed_estimate",
+    "apparent_bytes_removed",
+    "allocated_bytes_removed_estimate",
+    "filesystem_deltas",
     "selected_targets",
     "cleaned_paths",
     "skipped_paths",
