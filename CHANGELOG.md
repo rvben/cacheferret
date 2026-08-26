@@ -14,6 +14,11 @@ All notable changes to CacheFerret are documented here. The format follows
 - A native cleanup adapter contract now defines when daemon and package-manager
   pruning is safer than direct directory deletion, beginning with Docker.
 
+### Fixed
+
+- The Homebrew formula now uses Homebrew's architecture-aware DSL so ARM Linux
+  selects its published native archive instead of being rejected as unsupported.
+
 ## [0.4.2](https://github.com/rvben/cacheferret/compare/v0.4.1...v0.4.2) - 2026-08-26
 
 ### Changed
