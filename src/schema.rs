@@ -32,7 +32,7 @@ pub fn contract() -> Value {
                 "media_type": "application/x-terminal",
                 "errors": ["invalid_input", "io"],
                 "stability": "stable",
-                "example": {"args": ["tui", "--root", ".", "--scope", "project"]}
+                "example": {"args": ["--root", ".", "--scope", "project"]}
             },
             {
                 "name": "scan",
@@ -50,7 +50,7 @@ pub fn contract() -> Value {
                 "output_fields": candidate_fields(),
                 "errors": ["invalid_input", "io"],
                 "stability": "stable",
-                "example": {"args": ["scan", "--scope", "project", "--root", ".", "--limit", "10"]}
+                "example": {"args": ["--scope", "project", "--root", ".", "--limit", "10"]}
             },
             {
                 "name": "clean",
@@ -119,7 +119,7 @@ pub fn contract() -> Value {
                 ],
                 "errors": ["invalid_input", "confirmation_required", "conflict", "io"],
                 "stability": "stable",
-                "example": {"args": ["clean", "--root", ".", "--dry-run"]}
+                "example": {"args": ["--root", ".", "--dry-run"]}
             },
             {
                 "name": "catalog",
@@ -143,7 +143,7 @@ pub fn contract() -> Value {
                     {"name": "cleanable", "type": "boolean"}
                 ],
                 "stability": "stable",
-                "example": {"args": ["catalog"]}
+                "example": {"args": []}
             },
             {
                 "name": "schema",

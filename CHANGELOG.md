@@ -19,6 +19,12 @@ All notable changes to CacheFerret are documented here. The format follows
 - Storage copy now distinguishes apparent size, allocated-block estimates, and
   observed disk-free changes without claiming APFS shared blocks were reclaimed.
 
+### Fixed
+
+- clispec command examples now contain arguments relative to their command, so
+  automated conformance checks execute valid invocations instead of duplicating
+  the command name.
+
 ## [0.3.1](https://github.com/rvben/cacheferret/compare/v0.3.0...v0.3.1) - 2026-08-25
 
 ### Fixed

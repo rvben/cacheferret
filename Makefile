@@ -23,7 +23,7 @@ check: lint test packaging-check
 
 # Score the binary against The CLI Spec (clispec.dev). Requires `clispec`.
 conformance: release
-	clispec score ./target/release/cacheferret catalog
+	clispec score ./target/release/cacheferret
 
 packaging-check:
 	scripts/test-homebrew-formula.sh
