@@ -1,7 +1,10 @@
-.PHONY: build release test test-linux-e2e lint fmt check conformance packaging-check release-readiness clean install release-patch release-minor release-major update-deps
+.PHONY: build run release test test-linux-e2e lint fmt check conformance packaging-check release-readiness clean install release-patch release-minor release-major update-deps
 
 build:
 	cargo build
+
+run:
+	cargo run
 
 release:
 	cargo build --release
