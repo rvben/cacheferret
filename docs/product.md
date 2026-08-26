@@ -132,7 +132,7 @@ for automation. At minimum:
 
 ## Current distribution
 
-Version 0.4.1 is published on
+Version 0.4.2 is published on
 [crates.io](https://crates.io/crates/cacheferret),
 [PyPI](https://pypi.org/project/cacheferret/),
 [GitHub Releases](https://github.com/rvben/cacheferret/releases/latest), and the

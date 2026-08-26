@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/rvben/cacheferret/compare/v0.4.1...v0.4.2) - 2026-08-26
+
 ### Changed
 
 - Vership now updates durable documentation version references inside each
