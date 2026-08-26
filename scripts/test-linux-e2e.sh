@@ -66,7 +66,7 @@ jq -e '
 test -d "$projects/rust/target"
 
 dry_run_text=$($cacheferret_bin clean --root "$projects" --scope project --dry-run --output text)
-grep -Fq $'SIZE\tRESTORE\tKIND\tPATH' <<< "$dry_run_text"
+grep -Fq $'APPARENT\tALLOCATED\tRESTORE\tKIND\tPATH' <<< "$dry_run_text"
 grep -Fq "$projects/rust/target" <<< "$dry_run_text"
 
 # A piped cleanup without --yes must refuse with the declared stable error.

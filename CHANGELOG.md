@@ -6,6 +6,11 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux builds now use a platform-correct `statvfs` block-count conversion, and
+  the Linux end-to-end suite recognizes the expanded cleanup size columns.
+
 ## [0.4.0](https://github.com/rvben/cacheferret/compare/v0.3.1...v0.4.0) - 2026-08-26
 
 ### Added

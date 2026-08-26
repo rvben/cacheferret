@@ -195,8 +195,18 @@ fn filesystem_space(path: &Path) -> Option<FilesystemSpace> {
     };
     Some(FilesystemSpace {
         id,
-        available_bytes: u64::from(stats.f_bavail).saturating_mul(block_size),
+        available_bytes: available_blocks(&stats).saturating_mul(block_size),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn available_blocks(stats: &libc::statvfs) -> u64 {
+    u64::from(stats.f_bavail)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn available_blocks(stats: &libc::statvfs) -> u64 {
+    stats.f_bavail
 }
 
 #[cfg(not(unix))]
