@@ -42,6 +42,25 @@ pub struct DiscoveryOptions {
     pub protect_days: u64,
 }
 
+/// A recognized cache that is waiting for its filesystem tree to be measured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredCache {
+    pub kind: String,
+    pub ecosystem: String,
+    pub scope: CacheScope,
+    pub path: PathBuf,
+    pub cleanable: bool,
+}
+
+/// Incremental progress emitted while discovery and measurement overlap.
+#[derive(Debug, Clone)]
+pub enum DiscoveryEvent {
+    Discovered(DiscoveredCache),
+    Measured(CacheCandidate),
+    Skipped { path: PathBuf },
+    Warning(String),
+}
+
 /// A discovered cache directory.
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheCandidate {

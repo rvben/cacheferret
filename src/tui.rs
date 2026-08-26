@@ -8,8 +8,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use cacheferret::{
-    CacheCandidate, CacheScope, CleanReport, DiscoveryOptions, Error, ScanReport, ScopeFilter,
-    clean_candidates, discover, format_bytes, format_signed_bytes, refresh_candidate,
+    CacheCandidate, CacheScope, CleanReport, DiscoveredCache, DiscoveryEvent, DiscoveryOptions,
+    Error, ScanReport, ScopeFilter, clean_candidates, discover_with_progress, format_bytes,
+    format_signed_bytes, refresh_candidate,
 };
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -249,7 +250,11 @@ impl SortOrder {
 }
 
 enum WorkerMessage {
-    Scan(Result<ScanReport, Error>),
+    ScanDiscovered(DiscoveredCache),
+    ScanMeasured(CacheCandidate),
+    ScanSkipped(PathBuf),
+    ScanWarning(String),
+    ScanFinished(Result<ScanReport, Error>),
     Review {
         result: Result<Vec<CacheCandidate>, Error>,
         confirmed: bool,
@@ -261,9 +266,16 @@ struct App {
     options: Options,
     phase: Phase,
     candidates: Vec<CacheCandidate>,
+    measuring: Vec<DiscoveredCache>,
     visible: Vec<usize>,
+    visible_measuring: Vec<usize>,
     warnings: Vec<String>,
+    scan_discovered: usize,
+    scan_finished: usize,
+    scan_measured_paths: HashSet<PathBuf>,
+    refreshing: bool,
     cursor: usize,
+    focus_user_owned: bool,
     query: String,
     editing_filter: bool,
     view_scope: ViewScope,
@@ -289,9 +301,16 @@ impl App {
             options,
             phase: Phase::Scanning,
             candidates: Vec::new(),
+            measuring: Vec::new(),
             visible: Vec::new(),
+            visible_measuring: Vec::new(),
             warnings: Vec::new(),
+            scan_discovered: 0,
+            scan_finished: 0,
+            scan_measured_paths: HashSet::new(),
+            refreshing: false,
             cursor: 0,
+            focus_user_owned: false,
             query: String::new(),
             editing_filter: false,
             view_scope: ViewScope::All,
@@ -332,12 +351,22 @@ impl App {
                 self.candidates[*right]
                     .bytes
                     .cmp(&self.candidates[*left].bytes)
+                    .then_with(|| {
+                        self.candidates[*left]
+                            .path
+                            .cmp(&self.candidates[*right].path)
+                    })
             }),
             SortOrder::Age => indices.sort_by(|left, right| {
                 self.candidates[*right]
                     .age_days
                     .unwrap_or(0)
                     .cmp(&self.candidates[*left].age_days.unwrap_or(0))
+                    .then_with(|| {
+                        self.candidates[*left]
+                            .path
+                            .cmp(&self.candidates[*right].path)
+                    })
             }),
             SortOrder::Name => indices.sort_by(|left, right| {
                 self.candidates[*left]
@@ -346,15 +375,92 @@ impl App {
             }),
         }
         self.visible = indices;
-        self.cursor = self.cursor.min(self.visible.len().saturating_sub(1));
+        self.visible_measuring = self
+            .measuring
+            .iter()
+            .enumerate()
+            .filter(|(_, cache)| self.discovery_is_visible(cache))
+            .map(|(index, _)| index)
+            .collect();
+        self.cursor = self.cursor.min(self.visible_len().saturating_sub(1));
+    }
+
+    fn focused_path(&self) -> Option<PathBuf> {
+        if let Some(index) = self.focused_index() {
+            return Some(self.candidates[index].path.clone());
+        }
+        self.focused_measuring_index()
+            .map(|index| self.measuring[index].path.clone())
+    }
+
+    fn rebuild_visible_preserving(&mut self, focused_path: Option<&PathBuf>) {
+        self.rebuild_visible();
+        if !self.focus_user_owned {
+            self.cursor = 0;
+            return;
+        }
+        if let Some(path) = focused_path
+            && let Some(position) = self
+                .visible
+                .iter()
+                .position(|index| self.candidates[*index].path == *path)
+        {
+            self.cursor = position;
+            return;
+        }
+        if let Some(path) = focused_path
+            && let Some(position) = self
+                .visible_measuring
+                .iter()
+                .position(|index| self.measuring[*index].path == *path)
+        {
+            self.cursor = self.visible.len() + position;
+        }
+    }
+
+    fn discovery_is_visible(&self, cache: &DiscoveredCache) -> bool {
+        if !self.view_scope.includes(cache.scope) {
+            return false;
+        }
+        let query = self.query.to_ascii_lowercase();
+        query.is_empty()
+            || cache.kind.to_ascii_lowercase().contains(&query)
+            || cache.ecosystem.to_ascii_lowercase().contains(&query)
+            || cache
+                .path
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(&query)
+    }
+
+    fn visible_measurements(&self) -> impl Iterator<Item = &DiscoveredCache> {
+        self.visible_measuring
+            .iter()
+            .map(|index| &self.measuring[*index])
+    }
+
+    fn visible_len(&self) -> usize {
+        self.visible.len() + self.visible_measuring.len()
+    }
+
+    fn scan_pending(&self) -> usize {
+        self.scan_discovered.saturating_sub(self.scan_finished)
     }
 
     fn focused_index(&self) -> Option<usize> {
         self.visible.get(self.cursor).copied()
     }
 
+    fn focused_measuring_index(&self) -> Option<usize> {
+        self.cursor
+            .checked_sub(self.visible.len())
+            .and_then(|position| self.visible_measuring.get(position))
+            .copied()
+    }
+
     fn move_cursor(&mut self, amount: isize) {
-        let last = self.visible.len().saturating_sub(1);
+        self.focus_user_owned = true;
+        let last = self.visible_len().saturating_sub(1);
         self.cursor = if amount.is_negative() {
             self.cursor.saturating_sub(amount.unsigned_abs())
         } else {
@@ -395,7 +501,30 @@ impl App {
         self.move_cursor(1);
     }
 
+    fn toggle_scanning_selection(&mut self) {
+        self.focus_user_owned = true;
+        if self.focused_measuring_index().is_some() {
+            self.toast = Some((
+                "Wait for this cache to finish sizing before selecting it".to_owned(),
+                Instant::now(),
+            ));
+            return;
+        }
+        let Some(path) = self.focused_path() else {
+            return;
+        };
+        if self.refreshing && !self.scan_measured_paths.contains(&path) {
+            self.toast = Some((
+                "Waiting for this cache to be remeasured".to_owned(),
+                Instant::now(),
+            ));
+            return;
+        }
+        self.toggle_focused_selection();
+    }
+
     fn toggle_visible_selection(&mut self) {
+        self.focus_user_owned = true;
         let visible: Vec<PathBuf> = self
             .visible
             .iter()
@@ -421,42 +550,125 @@ impl App {
     }
 
     fn begin_scan(&mut self, tx: &Sender<WorkerMessage>) {
+        let focused = self.focused_path();
         self.phase = Phase::Scanning;
         self.scan_started = Instant::now();
+        self.refreshing = !self.candidates.is_empty();
+        self.measuring.clear();
+        self.scan_discovered = 0;
+        self.scan_finished = 0;
+        self.scan_measured_paths.clear();
+        self.warnings.clear();
         self.selected.clear();
         self.pending_delete.clear();
         self.deleting.clear();
         self.error = None;
+        self.toast = None;
+        self.rebuild_visible_preserving(focused.as_ref());
         let options = self.options.clone();
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let result = discover(&DiscoveryOptions {
-                roots: options.roots,
-                scope: options.scope,
-                kinds: options.kinds,
-                protect_days: 0,
-            });
-            let _ = tx.send(WorkerMessage::Scan(result));
+            let progress_tx = tx.clone();
+            let result = discover_with_progress(
+                &DiscoveryOptions {
+                    roots: options.roots,
+                    scope: options.scope,
+                    kinds: options.kinds,
+                    protect_days: 0,
+                },
+                move |event| {
+                    let message = match event {
+                        DiscoveryEvent::Discovered(cache) => WorkerMessage::ScanDiscovered(cache),
+                        DiscoveryEvent::Measured(cache) => WorkerMessage::ScanMeasured(cache),
+                        DiscoveryEvent::Skipped { path } => WorkerMessage::ScanSkipped(path),
+                        DiscoveryEvent::Warning(warning) => WorkerMessage::ScanWarning(warning),
+                    };
+                    let _ = progress_tx.send(message);
+                },
+            );
+            let _ = tx.send(WorkerMessage::ScanFinished(result));
         });
     }
 
     fn handle_worker(&mut self, message: WorkerMessage, tx: &Sender<WorkerMessage>) {
         match message {
-            WorkerMessage::Scan(Ok(report)) => {
+            WorkerMessage::ScanDiscovered(cache) => {
+                let focused = self.focused_path();
+                self.scan_discovered += 1;
+                if !self
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.path == cache.path)
+                    && !self
+                        .measuring
+                        .iter()
+                        .any(|pending| pending.path == cache.path)
+                {
+                    self.measuring.push(cache);
+                    self.rebuild_visible_preserving(focused.as_ref());
+                }
+            }
+            WorkerMessage::ScanMeasured(candidate) => {
+                let focused = self.focused_path();
+                self.scan_finished += 1;
+                self.scan_measured_paths.insert(candidate.path.clone());
+                self.measuring
+                    .retain(|pending| pending.path != candidate.path);
+                if let Some(current) = self
+                    .candidates
+                    .iter_mut()
+                    .find(|current| current.path == candidate.path)
+                {
+                    *current = candidate;
+                } else {
+                    self.candidates.push(candidate);
+                }
+                self.rebuild_visible_preserving(focused.as_ref());
+            }
+            WorkerMessage::ScanSkipped(path) => {
+                let focused = self.focused_path();
+                self.scan_finished += 1;
+                self.measuring.retain(|pending| pending.path != path);
+                self.rebuild_visible_preserving(focused.as_ref());
+            }
+            WorkerMessage::ScanWarning(warning) => self.warnings.push(warning),
+            WorkerMessage::ScanFinished(Ok(report)) => {
+                let focused = self.focused_path();
                 self.candidates = report.candidates;
+                self.measuring.clear();
                 self.warnings = report.warnings;
                 self.phase = Phase::Ready;
-                self.rebuild_visible();
+                self.selected.retain(|path| {
+                    self.candidates
+                        .iter()
+                        .any(|candidate| candidate.path == *path)
+                });
+                self.rebuild_visible_preserving(focused.as_ref());
                 if self.candidates.is_empty() {
                     self.toast = Some((
                         "No caches found — your disk is already tidy".to_owned(),
                         Instant::now(),
                     ));
                 }
+                self.refreshing = false;
             }
-            WorkerMessage::Scan(Err(error)) => {
+            WorkerMessage::ScanFinished(Err(error)) => {
                 self.error = Some(error.to_string());
-                self.phase = Phase::Failed;
+                self.measuring.clear();
+                if self.candidates.is_empty() {
+                    self.phase = Phase::Failed;
+                } else {
+                    self.phase = Phase::Ready;
+                    self.toast = Some((
+                        if self.refreshing {
+                            format!("Refresh failed — showing previous results · {error}")
+                        } else {
+                            format!("Scan stopped early — showing partial results · {error}")
+                        },
+                        Instant::now(),
+                    ));
+                }
+                self.refreshing = false;
             }
             WorkerMessage::Review {
                 result: Ok(candidates),
@@ -502,6 +714,7 @@ impl App {
     }
 
     fn begin_delete(&mut self, tx: &Sender<WorkerMessage>) {
+        self.focus_user_owned = true;
         let candidates = if self.selected.is_empty() {
             let Some(index) = self.focused_index() else {
                 return;
@@ -811,11 +1024,47 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<WorkerMessage>) {
         return;
     }
     match app.phase {
-        Phase::Scanning => {
-            if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
-                app.should_quit = true;
+        Phase::Scanning => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+            KeyCode::Char('?') => app.show_help = true,
+            KeyCode::Char('/') => {
+                app.focus_user_owned = true;
+                app.editing_filter = true;
             }
-        }
+            KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
+            KeyCode::PageDown => app.move_cursor(10),
+            KeyCode::PageUp => app.move_cursor(-10),
+            KeyCode::Home | KeyCode::Char('g') => {
+                app.focus_user_owned = true;
+                app.cursor = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                app.focus_user_owned = true;
+                app.cursor = app.visible_len().saturating_sub(1);
+            }
+            KeyCode::Tab => {
+                app.focus_user_owned = true;
+                app.view_scope = app.view_scope.next();
+                app.cursor = 0;
+                app.rebuild_visible();
+            }
+            KeyCode::Char(' ') => app.toggle_scanning_selection(),
+            KeyCode::Char('s') => {
+                app.focus_user_owned = true;
+                app.sort = app.sort.next();
+                app.cursor = 0;
+                app.rebuild_visible();
+            }
+            KeyCode::Char('a') | KeyCode::Char('d') => {
+                app.focus_user_owned = true;
+                app.toast = Some((
+                    "Finish sizing before batch selection or deletion".to_owned(),
+                    Instant::now(),
+                ));
+            }
+            _ => {}
+        },
         Phase::Confirming => match key.code {
             KeyCode::Char('y') | KeyCode::Char('d') | KeyCode::Enter => app.confirm_delete(tx),
             KeyCode::Char('n') | KeyCode::Esc => app.cancel_delete(),
@@ -830,8 +1079,12 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<WorkerMessage>) {
         Phase::Ready => match key.code {
             KeyCode::Char('q') => app.should_quit = true,
             KeyCode::Char('?') => app.show_help = true,
-            KeyCode::Char('/') => app.editing_filter = true,
+            KeyCode::Char('/') => {
+                app.focus_user_owned = true;
+                app.editing_filter = true;
+            }
             KeyCode::Esc if !app.query.is_empty() => {
+                app.focus_user_owned = true;
                 app.query.clear();
                 app.cursor = 0;
                 app.rebuild_visible();
@@ -840,9 +1093,16 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<WorkerMessage>) {
             KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
             KeyCode::PageDown => app.move_cursor(10),
             KeyCode::PageUp => app.move_cursor(-10),
-            KeyCode::Home | KeyCode::Char('g') => app.cursor = 0,
-            KeyCode::End | KeyCode::Char('G') => app.cursor = app.visible.len().saturating_sub(1),
+            KeyCode::Home | KeyCode::Char('g') => {
+                app.focus_user_owned = true;
+                app.cursor = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                app.focus_user_owned = true;
+                app.cursor = app.visible_len().saturating_sub(1);
+            }
             KeyCode::Tab => {
+                app.focus_user_owned = true;
                 app.view_scope = app.view_scope.next();
                 app.cursor = 0;
                 app.rebuild_visible();
@@ -850,6 +1110,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<WorkerMessage>) {
             KeyCode::Char(' ') => app.toggle_focused_selection(),
             KeyCode::Char('a') => app.toggle_visible_selection(),
             KeyCode::Char('s') => {
+                app.focus_user_owned = true;
                 app.sort = app.sort.next();
                 app.cursor = 0;
                 app.rebuild_visible();
@@ -883,7 +1144,9 @@ fn render(frame: &mut Frame, app: &mut App) {
         .split(area);
     render_header(frame, sections[0], app);
     match app.phase {
-        Phase::Scanning => render_busy(frame, sections[1], app, "Sniffing out rebuildable caches"),
+        Phase::Scanning if app.candidates.is_empty() && app.measuring.is_empty() => {
+            render_busy(frame, sections[1], app, "Sniffing out rebuildable caches");
+        }
         Phase::Reviewing => render_workspace(frame, sections[1], app),
         Phase::Failed => render_error(frame, sections[1], app),
         _ => render_workspace(frame, sections[1], app),
@@ -913,7 +1176,27 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     };
     let total_bytes: u64 = app.candidates.iter().map(|candidate| candidate.bytes).sum();
     let summary = if app.phase == Phase::Scanning {
-        String::new()
+        if app.refreshing {
+            format!(
+                "{} shown  {}  {} refreshed  {}  {} sizing",
+                app.candidates.len(),
+                app.ui.separator().trim(),
+                app.scan_measured_paths.len(),
+                app.ui.separator().trim(),
+                app.scan_pending()
+            )
+        } else if app.scan_discovered == 0 {
+            "searching project roots".to_owned()
+        } else {
+            format!(
+                "{} measured  {}  {} sizing  {}  {} apparent",
+                app.scan_measured_paths.len(),
+                app.ui.separator().trim(),
+                app.scan_pending(),
+                app.ui.separator().trim(),
+                format_bytes(total_bytes)
+            )
+        }
     } else {
         let warnings = if app.warnings.is_empty() {
             String::new()
@@ -1001,7 +1284,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     let indices = &app.visible;
     let compact = area.width < 76;
     let medium = !compact && area.width < 96;
-    let rows: Vec<Row> = indices
+    let mut rows: Vec<Row> = indices
         .iter()
         .map(|index| {
             let candidate = &app.candidates[*index];
@@ -1068,6 +1351,46 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
             Row::new(cells).style(row_style)
         })
         .collect();
+    rows.extend(app.visible_measurements().map(|cache| {
+        let marker = Cell::from(Span::styled(
+            progress_glyph(app),
+            Style::default().fg(palette.info),
+        ));
+        let size = Cell::from(if app.ui.unicode {
+            "sizing…"
+        } else {
+            "sizing"
+        })
+        .style(Style::default().fg(palette.info));
+        let path = Cell::from(cache.path.display().to_string());
+        let scope = match cache.scope {
+            CacheScope::Project => "project",
+            CacheScope::Global => "global",
+        };
+        let cells = if compact {
+            vec![marker, size, Cell::from(cache.kind.clone()), path]
+        } else if medium {
+            vec![
+                marker,
+                size,
+                Cell::from(cache.kind.clone()),
+                Cell::from(if app.ui.unicode { "—" } else { "-" })
+                    .style(Style::default().fg(palette.muted)),
+                path,
+            ]
+        } else {
+            vec![
+                marker,
+                size,
+                Cell::from(cache.kind.clone()),
+                Cell::from(if app.ui.unicode { "—" } else { "-" })
+                    .style(Style::default().fg(palette.muted)),
+                Cell::from(scope).style(Style::default().fg(palette.muted)),
+                path,
+            ]
+        };
+        Row::new(cells).style(Style::default().fg(palette.muted))
+    }));
     let selection = if app.selected.is_empty() {
         String::new()
     } else {
@@ -1156,7 +1479,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         )
         .highlight_symbol(if app.ui.unicode { "› " } else { "> " });
     let mut state = TableState::default();
-    if !indices.is_empty() {
+    if app.visible_len() > 0 {
         state.select(Some(app.cursor));
     }
     frame.render_stateful_widget(table, area, &mut state);
@@ -1164,17 +1487,57 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_details(frame: &mut Frame, area: Rect, app: &App) {
     let palette = app.ui.palette;
-    let Some(index) = app.focused_index() else {
+    if let Some(index) = app.focused_measuring_index() {
+        let cache = &app.measuring[index];
+        let scope = match cache.scope {
+            CacheScope::Project => "project",
+            CacheScope::Global => "global",
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            cache.path.display().to_string(),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        if area.height >= 10 {
+            lines.push(Line::from(""));
+        }
+        lines.extend([
+            labeled("Status", "Measuring size and age".to_owned(), palette),
+            labeled(
+                "Type",
+                format!("{}{}{}", cache.ecosystem, app.ui.separator(), cache.kind),
+                palette,
+            ),
+            labeled("Scope", scope.to_owned(), palette),
+            Line::from(vec![
+                Span::styled("Action   ", Style::default().fg(palette.muted)),
+                Span::styled(
+                    "Available when measurement finishes",
+                    Style::default().fg(palette.muted),
+                ),
+            ]),
+        ]);
         frame.render_widget(
-            Paragraph::new(if app.candidates.is_empty() {
-                "No caches found. Enjoy the breathing room."
-            } else {
-                "No caches match this view. Press Esc to clear the filter."
-            })
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(detail_block(" Details ", app.ui)),
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(detail_block(" Inspect ", app.ui)),
+            area,
+        );
+        return;
+    }
+    let Some(index) = app.focused_index() else {
+        let message = if app.candidates.is_empty() && app.measuring.is_empty() {
+            "No caches found. Enjoy the breathing room.".to_owned()
+        } else {
+            "No caches match this view. Press Esc to clear the filter.".to_owned()
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .style(Style::default().fg(palette.muted))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .block(detail_block(" Details ", app.ui)),
             area,
         );
         return;
@@ -1193,7 +1556,26 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
     };
     let selected = app.selected.contains(&candidate.path);
     let separator = app.ui.separator();
-    let action = if !candidate.cleanable && !selected {
+    let action = if app.phase == Phase::Scanning {
+        let current = !app.refreshing || app.scan_measured_paths.contains(&candidate.path);
+        let value = if !current {
+            "Refreshing measurement".to_owned()
+        } else if !candidate.cleanable && !selected {
+            format!("Space override{separator}scan-only")
+        } else if selected {
+            format!("selected{separator}Space unselect{separator}delete when ready")
+        } else {
+            format!("Space select{separator}delete when ready")
+        };
+        Span::styled(
+            value,
+            Style::default().fg(if current {
+                palette.accent
+            } else {
+                palette.muted
+            }),
+        )
+    } else if !candidate.cleanable && !selected {
         Span::styled(
             format!("Space override{separator}scan-only"),
             Style::default().fg(palette.muted),
@@ -1365,15 +1747,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 fn footer_shortcuts(app: &App, width: u16) -> Line<'static> {
     let palette = app.ui.palette;
     if app.phase == Phase::Scanning {
-        return Line::from(vec![
-            Span::styled(
-                "  q",
-                Style::default()
-                    .fg(palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" quit", Style::default().fg(palette.muted)),
-        ]);
+        return scanning_shortcuts(app, width);
     }
     if app.phase == Phase::Reviewing {
         return Line::from(vec![
@@ -1392,6 +1766,44 @@ fn footer_shortcuts(app: &App, width: u16) -> Line<'static> {
     } else {
         footer_shortcuts_for_width(app, "jk", width)
     }
+}
+
+fn scanning_shortcuts(app: &App, width: u16) -> Line<'static> {
+    let palette = app.ui.palette;
+    let movement = if app.ui.unicode { "↑↓" } else { "jk" };
+    if app.visible_len() == 0 {
+        return Line::from(vec![key("q", palette), hint("quit", palette)]);
+    }
+    if width < 76 {
+        return Line::from(vec![
+            key(movement, palette),
+            hint("move", palette),
+            key("/", palette),
+            hint("filter", palette),
+            key("q", palette),
+            hint("quit", palette),
+        ]);
+    }
+    let mut spans = vec![key(movement, palette), hint("move", palette)];
+    if app.focused_index().is_some() {
+        spans.extend([key("space", palette), hint("select", palette)]);
+    }
+    spans.extend([
+        key("/", palette),
+        hint("filter", palette),
+        key("tab", palette),
+        hint("scope", palette),
+    ]);
+    if width >= 110 {
+        spans.extend([key("s", palette), hint("sort", palette)]);
+    }
+    spans.extend([
+        key("?", palette),
+        hint("help", palette),
+        key("q", palette),
+        hint("quit", palette),
+    ]);
+    Line::from(spans)
 }
 
 fn footer_shortcuts_for_width(app: &App, movement: &'static str, width: u16) -> Line<'static> {
@@ -1464,7 +1876,7 @@ fn render_busy(frame: &mut Frame, area: Rect, app: &App, message: &str) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "Sizing directories in parallel.",
+            "Recognized caches appear here immediately.",
             Style::default().fg(palette.muted),
         )),
     ];
@@ -1734,7 +2146,9 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
     if !compact {
         lines.push(Line::from(Span::styled(
-            if app.ui.unicode {
+            if app.phase == Phase::Scanning {
+                "Sizing rows can be inspected; cleanup unlocks when measurement finishes."
+            } else if app.ui.unicode {
                 "× marks scan-only entries; select one explicitly to override."
             } else {
                 "x marks scan-only entries; select one explicitly to override."
@@ -1856,6 +2270,7 @@ mod tests {
     use std::fs;
     use std::time::SystemTime;
 
+    use cacheferret::discover;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use tempfile::tempdir;
@@ -1872,6 +2287,16 @@ mod tests {
 
     fn test_app(options: Options) -> App {
         App::with_ui(options, UiPreferences::rich())
+    }
+
+    fn discovered(path: PathBuf) -> DiscoveredCache {
+        DiscoveredCache {
+            kind: "cargo-target".to_owned(),
+            ecosystem: "rust".to_owned(),
+            scope: CacheScope::Project,
+            path,
+            cleanable: true,
+        }
     }
 
     fn receive_worker(app: &mut App, tx: &Sender<WorkerMessage>, rx: &Receiver<WorkerMessage>) {
@@ -1919,7 +2344,7 @@ mod tests {
         .unwrap();
         let mut app = test_app(options);
         let (tx, _rx) = mpsc::channel();
-        app.handle_worker(WorkerMessage::Scan(Ok(report)), &tx);
+        app.handle_worker(WorkerMessage::ScanFinished(Ok(report)), &tx);
         (temp, target, app)
     }
 
@@ -1952,7 +2377,7 @@ mod tests {
         .unwrap();
         let mut app = test_app(options);
         let (tx, _rx) = mpsc::channel();
-        app.handle_worker(WorkerMessage::Scan(Ok(report)), &tx);
+        app.handle_worker(WorkerMessage::ScanFinished(Ok(report)), &tx);
         (temp, targets, app)
     }
 
@@ -1973,6 +2398,230 @@ mod tests {
         assert_eq!(app.cursor, 0);
         app.move_cursor(-10);
         assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn recognized_cache_appears_while_it_is_still_being_measured() {
+        let mut app = test_app(options());
+        let path = PathBuf::from("/work/demo/target");
+        let (tx, _rx) = mpsc::channel();
+
+        app.handle_worker(WorkerMessage::ScanDiscovered(discovered(path.clone())), &tx);
+        let output = render_text(&mut app, 100, 24);
+
+        assert_eq!(app.phase, Phase::Scanning);
+        assert!(output.contains("cargo-target"), "{output}");
+        assert!(output.contains(&path.display().to_string()), "{output}");
+        assert!(output.contains("sizing…"), "{output}");
+        assert!(output.contains("0 measured"), "{output}");
+        assert!(output.contains("1 sizing"), "{output}");
+        assert_eq!(app.focused_path().as_ref(), Some(&path));
+        assert!(app.focused_measuring_index().is_some());
+        assert!(app.selected.is_empty());
+        assert!(output.contains("Measuring size and age"), "{output}");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &tx,
+        );
+        assert!(app.selected.is_empty());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(message, _)| message.contains("finish sizing"))
+        );
+    }
+
+    #[test]
+    fn progressive_scan_keeps_plain_ascii_terminals_clean() {
+        let mut app = test_app(options());
+        app.ui = UiPreferences::from_values(true, Some("dumb"), None, Some("C"), true, true);
+        let (tx, _rx) = mpsc::channel();
+        app.handle_worker(
+            WorkerMessage::ScanDiscovered(discovered(PathBuf::from("/work/demo/target"))),
+            &tx,
+        );
+
+        let output = render_text(&mut app, 80, 24);
+
+        assert!(output.contains("sizing"), "{output}");
+        for glyph in ["◉", "●", "›", "◐", "…", "—", "·", "↑", "↓"] {
+            assert!(!output.contains(glyph), "found unicode glyph {glyph:?}");
+        }
+    }
+
+    #[test]
+    fn progressive_measurement_preserves_the_focused_cache_while_resorting() {
+        let (_temp, _targets, mut app) = two_project_app();
+        app.phase = Phase::Scanning;
+        app.cursor = 1;
+        app.focus_user_owned = true;
+        let focused = app.focused_path().unwrap();
+        let mut larger = app.candidates[0].clone();
+        larger.path = PathBuf::from("/work/largest/target");
+        larger.bytes = 1024 * 1024;
+        let (tx, _rx) = mpsc::channel();
+
+        app.handle_worker(WorkerMessage::ScanMeasured(larger), &tx);
+
+        assert_eq!(app.focused_path().as_ref(), Some(&focused));
+        assert_eq!(
+            app.candidates[app.visible[0]].path,
+            PathBuf::from("/work/largest/target")
+        );
+    }
+
+    #[test]
+    fn untouched_focus_follows_the_largest_measured_cache() {
+        let (_temp, _targets, source) = two_project_app();
+        let mut smaller = source.candidates[0].clone();
+        smaller.path = PathBuf::from("/work/smaller/target");
+        smaller.bytes = 64;
+        let mut larger = source.candidates[1].clone();
+        larger.path = PathBuf::from("/work/larger/target");
+        larger.bytes = 4096;
+        let mut app = test_app(source.options.clone());
+        let (tx, _rx) = mpsc::channel();
+
+        app.handle_worker(
+            WorkerMessage::ScanDiscovered(discovered(smaller.path.clone())),
+            &tx,
+        );
+        assert_eq!(app.focused_path().as_ref(), Some(&smaller.path));
+        app.handle_worker(WorkerMessage::ScanMeasured(smaller.clone()), &tx);
+        app.handle_worker(
+            WorkerMessage::ScanDiscovered(discovered(larger.path.clone())),
+            &tx,
+        );
+        app.handle_worker(WorkerMessage::ScanMeasured(larger.clone()), &tx);
+
+        assert!(!app.focus_user_owned);
+        assert_eq!(app.focused_path().as_ref(), Some(&larger.path));
+        assert_eq!(app.candidates[app.visible[0]].path, larger.path);
+        assert!(app.selected.is_empty());
+    }
+
+    #[test]
+    fn user_focused_sizing_row_stays_focused_as_measurements_reorder() {
+        let (_temp, _targets, source) = two_project_app();
+        let first_path = PathBuf::from("/work/first/target");
+        let second_path = PathBuf::from("/work/second/target");
+        let mut first = source.candidates[0].clone();
+        first.path = first_path.clone();
+        first.bytes = 8192;
+        let mut second = source.candidates[1].clone();
+        second.path = second_path.clone();
+        second.bytes = 64;
+        let mut app = test_app(source.options.clone());
+        let (tx, _rx) = mpsc::channel();
+
+        app.handle_worker(
+            WorkerMessage::ScanDiscovered(discovered(first_path.clone())),
+            &tx,
+        );
+        app.handle_worker(
+            WorkerMessage::ScanDiscovered(discovered(second_path.clone())),
+            &tx,
+        );
+        app.move_cursor(1);
+        assert_eq!(app.focused_path().as_ref(), Some(&second_path));
+        assert!(app.focus_user_owned);
+
+        app.handle_worker(WorkerMessage::ScanMeasured(second), &tx);
+        assert_eq!(app.focused_path().as_ref(), Some(&second_path));
+        app.handle_worker(WorkerMessage::ScanMeasured(first), &tx);
+
+        assert_eq!(app.focused_path().as_ref(), Some(&second_path));
+        assert_eq!(app.candidates[app.visible[0]].path, first_path);
+    }
+
+    #[test]
+    fn scanning_workspace_remains_keyboard_navigable_but_not_deletable() {
+        let (_temp, _target, mut app) = project_app();
+        app.phase = Phase::Scanning;
+        app.refreshing = false;
+        let path = app.focused_path().unwrap();
+        app.scan_measured_paths.insert(path);
+        let (tx, _rx) = mpsc::channel();
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.selected.len(), 1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Scanning);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(message, _)| message.contains("Finish sizing"))
+        );
+    }
+
+    #[test]
+    fn rescan_keeps_the_previous_workspace_visible_until_results_arrive() {
+        let (_temp, target, mut app) = project_app();
+        let (tx, _rx) = mpsc::channel();
+
+        app.begin_scan(&tx);
+        let output = render_text(&mut app, 100, 24);
+
+        assert_eq!(app.phase, Phase::Scanning);
+        assert!(app.refreshing);
+        assert!(output.contains(&target.display().to_string()), "{output}");
+        assert!(output.contains("0 refreshed"), "{output}");
+        assert!(!output.contains("Recognized caches appear here immediately."));
+    }
+
+    #[test]
+    fn completed_rescan_replaces_stale_rows_with_the_authoritative_snapshot() {
+        let (_temp, _target, mut app) = project_app();
+        let (tx, _rx) = mpsc::channel();
+        app.phase = Phase::Scanning;
+        app.refreshing = true;
+
+        app.handle_worker(
+            WorkerMessage::ScanFinished(Ok(ScanReport {
+                candidates: Vec::new(),
+                warnings: Vec::new(),
+            })),
+            &tx,
+        );
+
+        assert_eq!(app.phase, Phase::Ready);
+        assert!(app.candidates.is_empty());
+        assert!(!app.refreshing);
+    }
+
+    #[test]
+    fn failed_rescan_keeps_previous_results_available() {
+        let (_temp, target, mut app) = project_app();
+        let (tx, _rx) = mpsc::channel();
+        app.phase = Phase::Scanning;
+        app.refreshing = true;
+
+        app.handle_worker(
+            WorkerMessage::ScanFinished(Err(Error::InvalidPath {
+                path: PathBuf::from("/missing"),
+            })),
+            &tx,
+        );
+
+        assert_eq!(app.phase, Phase::Ready);
+        assert_eq!(app.candidates.len(), 1);
+        assert_eq!(app.candidates[0].path, target.canonicalize().unwrap());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(message, _)| message.contains("showing previous results"))
+        );
     }
 
     #[test]
@@ -2065,7 +2714,7 @@ mod tests {
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();
-        app.handle_worker(WorkerMessage::Scan(Ok(report)), &tx);
+        app.handle_worker(WorkerMessage::ScanFinished(Ok(report)), &tx);
 
         let candidate = &app.candidates[0];
         assert!(candidate.protected);
@@ -2177,7 +2826,7 @@ mod tests {
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();
-        app.handle_worker(WorkerMessage::Scan(Ok(report)), &tx);
+        app.handle_worker(WorkerMessage::ScanFinished(Ok(report)), &tx);
 
         handle_key(
             &mut app,

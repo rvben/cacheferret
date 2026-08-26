@@ -50,8 +50,15 @@ The interface should prioritize the cache list, size, age, scope, ecosystem,
 and a useful focused-item explanation. Selection must remain quick: repeated
 `Space` presses build a batch while advancing down the list, and `a` operates
 on the current filtered/scope view. Background work must remain visible and
-must not freeze input. Empty, filtered-empty, scanning, deleting, success,
-conflict, and failure states all deserve intentional copy and layout.
+must not freeze input. Recognized caches appear immediately as sizing rows,
+completed measurements become browsable as they arrive, and rescans keep
+the previous workspace visible until the fresh snapshot is ready. Before the
+user interacts, focus follows the leading measured result; navigation,
+filtering, or selection transfers focus ownership to the user, and subsequent
+scan updates preserve the focused path as rows reorder. Focus never implies
+cleanup selection, and caches are never selected automatically. Empty,
+filtered-empty, scanning, deleting, success, conflict, and failure states all
+deserve intentional copy and layout.
 
 Storage accounting must distinguish three concepts throughout the TUI, text,
 and JSON interfaces: logical/apparent file length, filesystem blocks allocated

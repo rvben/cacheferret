@@ -15,10 +15,10 @@ pub use catalog::{catalog, default_roots};
 pub use cleaner::clean_candidates;
 pub use error::Error;
 pub use model::{
-    CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveryOptions,
-    FilesystemSpaceDelta, OutputFormat, ScanReport, ScopeFilter,
+    CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveredCache,
+    DiscoveryEvent, DiscoveryOptions, FilesystemSpaceDelta, OutputFormat, ScanReport, ScopeFilter,
 };
-pub use scanner::{discover, refresh_candidate};
+pub use scanner::{discover, discover_with_progress, refresh_candidate};
 
 /// Render a byte count compactly for terminal output.
 pub fn format_bytes(bytes: u64) -> String {
