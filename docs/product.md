@@ -50,7 +50,8 @@ Users run it among source trees, package-manager stores, compiler output,
 virtual environments, and recognized temporary build storage. Bare
 `cacheferret` opens the TUI when stdin and stdout are terminals; when piped, the
 same command performs a read-only JSON scan. Explicit `tui`, `scan`, `clean`,
-`catalog`, and `schema` commands support focused human and automated workflows.
+`catalog`, `docker`, and `schema` commands support focused human and automated
+workflows.
 
 The TUI follows a familiar ncdu/gdu interaction model:
 
@@ -99,6 +100,15 @@ Empty, filtered-empty, scanning, deleting, success, conflict, and failure
 states require intentional copy and layout. The TUI is the product experience,
 not a decorative wrapper around the CLI.
 
+When global storage is in scope and cache-kind filters are not active, Docker
+inspection runs independently of the filesystem scan. Images, containers,
+volumes, and build cache appear after filesystem cache rows, ordered by
+Docker-reported reclaimable bytes. They use daemon scope, never fake paths,
+never enter the selection set, and always keep their inspection-only action
+visible in compact layouts. Missing, stopped, remote, permission-denied, slow,
+or malformed Docker responses degrade to bounded diagnostics without failing
+the filesystem scan.
+
 ### Storage accounting
 
 The TUI, text, and JSON interfaces distinguish three concepts:
@@ -113,6 +123,10 @@ The TUI, text, and JSON interfaces distinguish three concepts:
 
 Free-space changes must not be summed across volumes that may share one APFS
 container.
+
+Native providers report their own total usage and potentially reclaimable
+bytes. Those values remain a separate accounting layer and must not be folded
+into filesystem apparent, allocated, or observed-free-space totals.
 
 ### Deletion and proportional confirmation
 
@@ -149,6 +163,7 @@ In scope:
 - Disk-usage discovery, filtering, sorting, inspection, focused deletion, and
   rapid batch selection.
 - Safe preview and cleanup for scripts.
+- Read-only Docker storage inspection in the TUI, text output, and JSON.
 - Human-readable terminal output and clispec.dev v0.3 JSON behavior.
 - macOS and Linux on x86_64 and aarch64.
 
@@ -159,8 +174,8 @@ Out of scope unless deliberately designed later:
 - Implicitly or batch-selecting state that may be the only copy of user-created
   artifacts.
 - Treating arbitrary system-temporary contents as caches.
-- Treating Docker storage as ordinary directories; Docker cleanup requires a
-  Docker-aware integration with native sizing and prune semantics.
+- Treating Docker storage as ordinary directories, or enabling Docker cleanup
+  before resource-specific revalidation and prune semantics are designed.
 - Claiming Windows support before discovery rules, terminal behavior, tests,
   and packaging are intentionally supported.
 
@@ -182,7 +197,8 @@ brand claims or declare an unreviewed replacement final.
 
 - `README.md` documents the public promise, command surface, safety model,
   supported cache catalog, installation methods, and storage terminology.
-- `src/catalog.rs`, `src/scanner.rs`, `src/cleaner.rs`, and `src/tui.rs` are the
+- `src/catalog.rs`, `src/scanner.rs`, `src/cleaner.rs`, `src/docker.rs`, and
+  `src/tui.rs` are the
   behavioral source of truth for recognition, measurement, mutation safety,
   and the interactive workspace.
 - `cacheferret schema` and `src/schema.rs` expose the offline machine contract.
@@ -251,7 +267,7 @@ successful build.
   Linux for GitHub archives, crates.io, PyPI, and Homebrew.
 - Continue polishing navigation, focus continuity, responsive terminal
   layouts, copy, and visual identity based on real terminal use.
-- Implement the native cleanup adapter design, beginning with read-only Docker
-  storage inspection instead of weakening the closed directory catalog.
+- Design resource-specific Docker prune operations with refreshed previews,
+  proportional confirmation, and final native revalidation.
 - Consider Windows only as a complete platform effort, not merely another
   wheel target.

@@ -5,6 +5,11 @@ remeasures the selected tree, checks its identity and ownership markers, and
 then removes exactly that path. It does not currently invoke package-manager or
 daemon cleanup commands.
 
+Docker is the first read-only native adapter. `cacheferret docker` invokes a
+bounded `docker system df --format json` inspection and exposes the result in
+text, JSON, the offline schema, and the TUI. It does not implement Docker
+revalidation or cleanup yet.
+
 That remains the right default for disposable build trees such as Cargo
 `target/`, `node_modules`, CMake build directories, and Python bytecode. The
 path is the unit the user inspected and selected. A project-level native clean
@@ -80,12 +85,12 @@ disk activity.
 Docker is the first adapter because its storage is both large and unsafe to
 treat as ordinary directories.
 
-1. Add read-only detection and `docker system df` inspection. A stopped,
+1. Read-only detection and `docker system df` inspection. A stopped,
    missing, remote, or permission-denied daemon becomes a bounded diagnostic.
-2. Represent build cache, images, stopped containers, and unused volumes as
+2. Build cache, images, containers, and volumes are represented as
    distinct native resources with native-reported total and reclaimable bytes.
-3. Add JSON and TUI presentation before mutation. Do not force daemon resources
-   into fake filesystem paths.
+3. JSON and TUI presentation ship before mutation. Daemon resources never use
+   fake filesystem paths and remain non-selectable.
 4. Add resource-specific prune operations with refreshed previews and the same
    proportional confirmation policy used for directory candidates.
 5. Consider a combined system prune only as an explicit advanced action;

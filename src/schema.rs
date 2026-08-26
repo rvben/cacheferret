@@ -53,6 +53,24 @@ pub fn contract() -> Value {
                 "example": {"args": ["--scope", "project", "--root", ".", "--limit", "10"]}
             },
             {
+                "name": "docker",
+                "description": "Inspect Docker-managed storage without changing daemon state.",
+                "effects": "read_only",
+                "mutating": false,
+                "cardinality": "unbounded",
+                "pagination": {
+                    "style": "offset",
+                    "offset_arg": "--offset",
+                    "limit_arg": "--limit"
+                },
+                "fields_arg": "--fields",
+                "args": native_inspection_args(),
+                "output_fields": native_resource_fields(),
+                "errors": ["invalid_input"],
+                "stability": "stable",
+                "example": {"args": ["--fields", "kind,reclaimable_bytes"]}
+            },
+            {
                 "name": "clean",
                 "description": "Remove eligible caches after final validation and explicit confirmation.",
                 "effects": "idempotent",
@@ -249,6 +267,28 @@ fn catalog_args() -> Vec<Value> {
         json!({"name": "--limit", "type": "integer", "default": 100, "description": "Maximum records in this page (1-1000)."}),
         json!({"name": "--offset", "type": "integer", "default": 0, "description": "Zero-based record offset."}),
         json!({"name": "--fields", "type": "string[]", "required": false, "description": "Catalog fields to include."}),
+    ]
+}
+
+fn native_inspection_args() -> Vec<Value> {
+    vec![
+        json!({"name": "--limit", "type": "integer", "default": 100, "description": "Maximum records in this page (1-1000)."}),
+        json!({"name": "--offset", "type": "integer", "default": 0, "description": "Zero-based record offset."}),
+        json!({"name": "--fields", "type": "string[]", "required": false, "description": "Native resource fields to include."}),
+    ]
+}
+
+fn native_resource_fields() -> Vec<Value> {
+    vec![
+        json!({"name": "provider", "type": "string", "enum": ["docker"]}),
+        json!({"name": "scope", "type": "string", "enum": ["daemon"]}),
+        json!({"name": "kind", "type": "string"}),
+        json!({"name": "label", "type": "string"}),
+        json!({"name": "total_count", "type": "integer"}),
+        json!({"name": "active_count", "type": "integer"}),
+        json!({"name": "bytes", "type": "integer"}),
+        json!({"name": "reclaimable_bytes", "type": "integer"}),
+        json!({"name": "cleanable", "type": "boolean", "description": "Always false until a separately designed native cleanup flow is available."}),
     ]
 }
 

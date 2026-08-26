@@ -112,6 +112,52 @@ pub struct ScanReport {
     pub warnings: Vec<String>,
 }
 
+/// Storage managed by a native tool rather than a filesystem path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativeResource {
+    pub provider: String,
+    pub scope: String,
+    pub kind: String,
+    pub label: String,
+    pub total_count: u64,
+    pub active_count: u64,
+    pub bytes: u64,
+    pub reclaimable_bytes: u64,
+    pub cleanable: bool,
+}
+
+/// A bounded, actionable problem reported by a native storage provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativeDiagnostic {
+    pub provider: String,
+    pub kind: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+/// Complete read-only inspection result for a native storage provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativeReport {
+    pub provider: String,
+    pub available: bool,
+    pub resources: Vec<NativeResource>,
+    pub diagnostics: Vec<NativeDiagnostic>,
+}
+
+impl NativeReport {
+    pub fn total_bytes(&self) -> u64 {
+        self.resources
+            .iter()
+            .fold(0, |total, resource| total.saturating_add(resource.bytes))
+    }
+
+    pub fn total_reclaimable_bytes(&self) -> u64 {
+        self.resources.iter().fold(0, |total, resource| {
+            total.saturating_add(resource.reclaimable_bytes)
+        })
+    }
+}
+
 impl ScanReport {
     pub fn total_bytes(&self) -> u64 {
         self.candidates

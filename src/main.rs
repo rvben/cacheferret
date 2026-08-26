@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cacheferret::{
-    CacheCandidate, CleanReport, DiscoveryOptions, Error, OutputFormat, ScopeFilter,
-    clean_candidates, default_roots, discover, format_bytes, format_signed_bytes, schema,
+    CacheCandidate, CleanReport, DiscoveryOptions, Error, NativeReport, NativeResource,
+    OutputFormat, ScopeFilter, clean_candidates, default_roots, discover, format_bytes,
+    format_signed_bytes, inspect_docker, schema,
 };
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -37,6 +38,8 @@ enum Command {
     Tui(TuiArgs),
     /// Find and size developer caches without changing anything.
     Scan(ScanArgs),
+    /// Inspect Docker-managed storage without changing daemon state.
+    Docker(DockerArgs),
     /// Safely remove eligible caches after confirmation.
     Clean(CleanArgs),
     /// List every cache kind CacheFerret knows how to identify.
@@ -120,6 +123,21 @@ struct ScanArgs {
     offset: usize,
 
     /// Candidate fields to include. Comma-separated or repeatable.
+    #[arg(long, value_delimiter = ',', value_name = "FIELD")]
+    fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct DockerArgs {
+    /// Maximum records returned in this page.
+    #[arg(long, default_value_t = 100, value_parser = parse_limit)]
+    limit: usize,
+
+    /// Zero-based record offset.
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
+
+    /// Native resource fields to include. Comma-separated or repeatable.
     #[arg(long, value_delimiter = ',', value_name = "FIELD")]
     fields: Vec<String>,
 }
@@ -230,6 +248,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Catalog(args)) => run_catalog(args, format),
         Some(Command::Scan(args)) => run_scan(args, format),
+        Some(Command::Docker(args)) => run_docker(args, format),
         Some(Command::Clean(args)) => run_clean(args, format),
         None if cli.output == CliOutput::Auto
             && std::io::stdin().is_terminal()
@@ -250,6 +269,42 @@ fn main() -> ExitCode {
             ExitCode::from(error.exit_code())
         }
     }
+}
+
+fn run_docker(args: DockerArgs, format: OutputFormat) -> Result<String, Error> {
+    validate_field_set(&args.fields, &NATIVE_RESOURCE_FIELDS)?;
+    let report = inspect_docker();
+    let total = report.resources.len();
+    let end = args.offset.saturating_add(args.limit).min(total);
+    let page = if args.offset >= total {
+        &[]
+    } else {
+        &report.resources[args.offset..end]
+    };
+
+    Ok(match format {
+        OutputFormat::Json => {
+            let items = page
+                .iter()
+                .map(|resource| project_native_fields(resource, &args.fields))
+                .collect::<Vec<_>>();
+            json!({
+                "provider": report.provider,
+                "available": report.available,
+                "items": items,
+                "total": total,
+                "total_bytes": report.total_bytes(),
+                "total_reclaimable_bytes": report.total_reclaimable_bytes(),
+                "returned": page.len(),
+                "offset": args.offset,
+                "limit": args.limit,
+                "truncated": end < total,
+                "diagnostics": report.diagnostics,
+            })
+            .to_string()
+        }
+        OutputFormat::Text => render_docker_text(&report, page, end < total),
+    })
 }
 
 fn run_tui(args: TuiArgs, output: CliOutput) -> ExitCode {
@@ -545,6 +600,43 @@ fn render_scan_text(
     lines.join("\n")
 }
 
+fn render_docker_text(report: &NativeReport, page: &[NativeResource], truncated: bool) -> String {
+    if !report.available {
+        let detail = report
+            .diagnostics
+            .first()
+            .map_or("Docker is unavailable", |diagnostic| {
+                diagnostic.message.as_str()
+            });
+        return format!("Docker storage unavailable: {detail}");
+    }
+
+    let mut lines = vec![format!(
+        "Docker uses {}; {} is potentially reclaimable{}",
+        format_bytes(report.total_bytes()),
+        format_bytes(report.total_reclaimable_bytes()),
+        if truncated { " (output truncated)" } else { "" }
+    )];
+    lines.push("RECLAIMABLE\tSIZE\tACTIVE\tTOTAL\tKIND".to_owned());
+    lines.extend(page.iter().map(|resource| {
+        format!(
+            "{}\t{}\t{}\t{}\t{}",
+            format_bytes(resource.reclaimable_bytes),
+            format_bytes(resource.bytes),
+            resource.active_count,
+            resource.total_count,
+            resource.kind
+        )
+    }));
+    lines.extend(
+        report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("Diagnostic: {}", diagnostic.message)),
+    );
+    lines.join("\n")
+}
+
 fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -> String {
     match format {
         OutputFormat::Json => {
@@ -661,6 +753,18 @@ const CATALOG_FIELDS: [&str; 6] = [
     "cleanable",
 ];
 
+const NATIVE_RESOURCE_FIELDS: [&str; 9] = [
+    "provider",
+    "kind",
+    "label",
+    "total_count",
+    "active_count",
+    "bytes",
+    "reclaimable_bytes",
+    "cleanable",
+    "scope",
+];
+
 const CLEAN_FIELDS: [&str; 19] = [
     "changed",
     "dry_run",
@@ -732,6 +836,11 @@ fn parse_limit(value: &str) -> Result<usize, String> {
 
 fn project_fields(candidate: &CacheCandidate, fields: &[String]) -> Value {
     let value = serde_json::to_value(candidate).expect("candidate serializes");
+    project_object(value, fields)
+}
+
+fn project_native_fields(resource: &NativeResource, fields: &[String]) -> Value {
+    let value = serde_json::to_value(resource).expect("native resource serializes");
     project_object(value, fields)
 }
 

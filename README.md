@@ -45,6 +45,9 @@ cacheferret tui --root ~/Projects --scope project
 # Produce plain or structured scan output without opening the TUI
 cacheferret scan --root ~/Projects --scope project
 
+# Inspect Docker-managed storage without pruning anything
+cacheferret docker
+
 # Preview old project caches that are eligible for cleanup
 cacheferret clean --root ~/Projects --dry-run
 
@@ -83,6 +86,9 @@ Output is human-readable on a terminal and JSON when piped:
 ```sh
 cacheferret scan --limit 20 --fields kind,path,bytes |
   jq '.items[] | select(.bytes > 1073741824)'
+
+cacheferret docker --fields kind,reclaimable_bytes |
+  jq '.items[] | select(.reclaimable_bytes > 1073741824)'
 ```
 
 ## Safety model
@@ -119,6 +125,9 @@ cacheferret scan --limit 20 --fields kind,path,bytes |
 - `--dry-run` follows the same discovery and eligibility policy without
   deleting anything, and lists every selected path with its apparent size,
   allocated-block estimate, and restore requirements.
+- Docker storage is inspected through a bounded, read-only native command. Its
+  daemon-scoped rows are never selectable and CacheFerret does not run a Docker
+  prune command.
 
 CacheFerret reports storage in three deliberately separate layers:
 
@@ -137,6 +146,10 @@ JSON exposes the explicit `apparent_bytes_*`, `allocated_bytes_*`, and
 summed across volumes, because APFS volumes may share one underlying storage
 pool. The older `bytes_selected` and `bytes_reclaimed_estimate` fields remain as
 apparent-byte compatibility aliases.
+
+Docker-managed storage is reported separately using Docker's native total and
+reclaimable estimates. These values are not filesystem-path measurements and
+are never folded into apparent, allocated, or observed-free-space totals.
 
 ## Supported caches
 
@@ -160,9 +173,11 @@ release covers:
 | macOS | — | Chrome signing clones, temporary build caches, and large temporary workspaces (scan-only) |
 | Other | any directory with a valid `CACHEDIR.TAG` | — |
 
-Docker build data is intentionally not treated as a directory cache. It needs a
-separate native `docker builder prune` integration with Docker-aware sizing and
-is planned as a follow-up. The bounded adapter contract and the native cleanup
+Docker build data is intentionally not treated as a directory cache.
+`cacheferret docker` uses `docker system df` to report images, containers,
+volumes, and build cache as distinct inspection-only resources. The TUI shows
+the same daemon-scoped rows when global storage is in scope. No prune command is
+implemented yet. The bounded adapter contract and the native cleanup
 opportunities for other package managers are documented in
 [docs/native-cleanup.md](docs/native-cleanup.md).
 
@@ -184,6 +199,7 @@ temporary entries remain protected unless `--include-recent` is supplied.
 | `cacheferret` | Open the TUI on a terminal; scan as JSON when piped |
 | `cacheferret tui` | Open the interactive browser with optional discovery filters |
 | `cacheferret scan` | Scan with root, scope, kind, pagination, and field controls |
+| `cacheferret docker` | Inspect Docker storage with pagination and field controls; never prune |
 | `cacheferret clean` | Preview or clean eligible caches |
 | `cacheferret catalog` | List supported cache kinds with pagination and field controls |
 | `cacheferret schema [path]` | Print or narrow the clispec.dev v0.3 contract |
@@ -200,12 +216,13 @@ CacheFerret follows [clispec.dev v0.3](https://clispec.dev):
 - structured error envelopes as the last stderr line in JSON mode;
 - offline `schema` introspection with effects, cardinality, pagination, output
   fields, confirmation gates, and stable exit codes;
-- offset pagination and `--fields` for the unbounded scan result;
+- offset pagination and `--fields` for unbounded scan and Docker results;
 - honest `read_only` and `idempotent` effect declarations.
 
 ```sh
 cacheferret schema
 cacheferret schema clean
+cacheferret schema docker
 ```
 
 | exit | kind | meaning |

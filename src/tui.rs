@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use cacheferret::{
     CacheCandidate, CacheScope, CleanReport, DiscoveredCache, DiscoveryEvent, DiscoveryOptions,
-    Error, ScanReport, ScopeFilter, clean_candidates, discover_with_progress_prioritized,
-    format_bytes, format_signed_bytes, refresh_candidate,
+    Error, NativeReport, NativeResource, ScanReport, ScopeFilter, clean_candidates,
+    discover_with_progress_prioritized, format_bytes, format_signed_bytes, inspect_docker,
+    refresh_candidate,
 };
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -259,11 +260,18 @@ enum WorkerMessage {
     ScanSkipped(PathBuf),
     ScanWarning(String),
     ScanFinished(Result<ScanReport, Error>),
+    NativeInspected(NativeReport),
     Review {
         result: Result<Vec<CacheCandidate>, Error>,
         confirmed: bool,
     },
     Clean(CleanReport),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FocusKey {
+    Path(PathBuf),
+    Native(String),
 }
 
 struct App {
@@ -274,6 +282,8 @@ struct App {
     remembered: HashMap<PathBuf, RememberedCache>,
     visible: Vec<usize>,
     visible_measuring: Vec<usize>,
+    native_resources: Vec<NativeResource>,
+    visible_native: Vec<usize>,
     warnings: Vec<String>,
     scan_discovered: usize,
     scan_pending_paths: HashSet<PathBuf>,
@@ -328,6 +338,8 @@ impl App {
             remembered,
             visible: Vec::new(),
             visible_measuring: Vec::new(),
+            native_resources: Vec::new(),
+            visible_native: Vec::new(),
             warnings: Vec::new(),
             scan_discovered: 0,
             scan_pending_paths: HashSet::new(),
@@ -408,24 +420,58 @@ impl App {
             .filter(|(_, cache)| self.discovery_is_visible(cache))
             .map(|(index, _)| index)
             .collect();
+        self.visible_native = self
+            .native_resources
+            .iter()
+            .enumerate()
+            .filter(|(_, resource)| self.native_is_visible(resource))
+            .map(|(index, _)| index)
+            .collect();
+        match self.sort {
+            SortOrder::Name => self.visible_native.sort_by(|left, right| {
+                self.native_resources[*left]
+                    .label
+                    .cmp(&self.native_resources[*right].label)
+            }),
+            SortOrder::Size | SortOrder::Age => self.visible_native.sort_by(|left, right| {
+                self.native_resources[*right]
+                    .reclaimable_bytes
+                    .cmp(&self.native_resources[*left].reclaimable_bytes)
+                    .then_with(|| {
+                        self.native_resources[*left]
+                            .label
+                            .cmp(&self.native_resources[*right].label)
+                    })
+            }),
+        }
         self.cursor = self.cursor.min(self.visible_len().saturating_sub(1));
     }
 
-    fn focused_path(&self) -> Option<PathBuf> {
+    fn focused_key(&self) -> Option<FocusKey> {
         if let Some(index) = self.focused_index() {
-            return Some(self.candidates[index].path.clone());
+            return Some(FocusKey::Path(self.candidates[index].path.clone()));
         }
-        self.focused_measuring_index()
-            .map(|index| self.measuring[index].path.clone())
+        if let Some(index) = self.focused_measuring_index() {
+            return Some(FocusKey::Path(self.measuring[index].path.clone()));
+        }
+        self.focused_native_index()
+            .map(|index| FocusKey::Native(self.native_resources[index].kind.clone()))
     }
 
-    fn rebuild_visible_preserving(&mut self, focused_path: Option<&PathBuf>) {
+    fn focused_path(&self) -> Option<PathBuf> {
+        match self.focused_key() {
+            Some(FocusKey::Path(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    fn rebuild_visible_preserving(&mut self, focused: Option<&FocusKey>) {
         self.rebuild_visible();
         if !self.focus_user_owned {
             self.cursor = 0;
             return;
         }
-        if let Some(path) = focused_path
+        if let Some(FocusKey::Path(path)) = focused
             && let Some(position) = self
                 .visible
                 .iter()
@@ -434,13 +480,22 @@ impl App {
             self.cursor = position;
             return;
         }
-        if let Some(path) = focused_path
+        if let Some(FocusKey::Path(path)) = focused
             && let Some(position) = self
                 .visible_measuring
                 .iter()
                 .position(|index| self.measuring[*index].path == *path)
         {
             self.cursor = self.visible.len() + position;
+            return;
+        }
+        if let Some(FocusKey::Native(kind)) = focused
+            && let Some(position) = self
+                .visible_native
+                .iter()
+                .position(|index| self.native_resources[*index].kind == *kind)
+        {
+            self.cursor = self.visible.len() + self.visible_measuring.len() + position;
         }
     }
 
@@ -465,8 +520,25 @@ impl App {
             .map(|index| &self.measuring[*index])
     }
 
+    fn visible_native_resources(&self) -> impl Iterator<Item = &NativeResource> {
+        self.visible_native
+            .iter()
+            .map(|index| &self.native_resources[*index])
+    }
+
+    fn native_is_visible(&self, resource: &NativeResource) -> bool {
+        if self.view_scope == ViewScope::Project {
+            return false;
+        }
+        let query = self.query.to_ascii_lowercase();
+        query.is_empty()
+            || resource.provider.to_ascii_lowercase().contains(&query)
+            || resource.kind.to_ascii_lowercase().contains(&query)
+            || resource.label.to_ascii_lowercase().contains(&query)
+    }
+
     fn visible_len(&self) -> usize {
-        self.visible.len() + self.visible_measuring.len()
+        self.visible.len() + self.visible_measuring.len() + self.visible_native.len()
     }
 
     fn scan_pending(&self) -> usize {
@@ -481,6 +553,13 @@ impl App {
         self.cursor
             .checked_sub(self.visible.len())
             .and_then(|position| self.visible_measuring.get(position))
+            .copied()
+    }
+
+    fn focused_native_index(&self) -> Option<usize> {
+        self.cursor
+            .checked_sub(self.visible.len() + self.visible_measuring.len())
+            .and_then(|position| self.visible_native.get(position))
             .copied()
     }
 
@@ -511,6 +590,13 @@ impl App {
     }
 
     fn toggle_focused_selection(&mut self) {
+        if self.focused_native_index().is_some() {
+            self.toast = Some((
+                "Docker storage is inspection-only; cleanup is not available yet".to_owned(),
+                Instant::now(),
+            ));
+            return;
+        }
         let Some(index) = self.focused_index() else {
             return;
         };
@@ -529,6 +615,13 @@ impl App {
 
     fn toggle_scanning_selection(&mut self) {
         self.focus_user_owned = true;
+        if self.focused_native_index().is_some() {
+            self.toast = Some((
+                "Docker storage is inspection-only; cleanup is not available yet".to_owned(),
+                Instant::now(),
+            ));
+            return;
+        }
         if self.focused_measuring_index().is_some() {
             self.toast = Some((
                 "Wait for this cache to finish sizing before selecting it".to_owned(),
@@ -576,7 +669,7 @@ impl App {
     }
 
     fn begin_scan(&mut self, tx: &Sender<WorkerMessage>) {
-        let focused = self.focused_path();
+        let focused = self.focused_key();
         self.phase = Phase::Scanning;
         self.scan_started = Instant::now();
         self.refreshing = !self.candidates.is_empty() || !self.remembered.is_empty();
@@ -610,6 +703,15 @@ impl App {
         self.error = None;
         self.toast = None;
         self.rebuild_visible_preserving(focused.as_ref());
+        if self.options.kinds.is_empty() && self.options.scope != ScopeFilter::Project {
+            let native_tx = tx.clone();
+            std::thread::spawn(move || {
+                let _ = native_tx.send(WorkerMessage::NativeInspected(inspect_docker()));
+            });
+        } else {
+            self.native_resources.clear();
+            self.visible_native.clear();
+        }
         let options = self.options.clone();
         let scan_options = self.options.clone();
         let tx = tx.clone();
@@ -643,7 +745,7 @@ impl App {
     fn handle_worker(&mut self, message: WorkerMessage, tx: &Sender<WorkerMessage>) {
         match message {
             WorkerMessage::ScanDiscovered(cache) => {
-                let focused = self.focused_path();
+                let focused = self.focused_key();
                 if self.scan_pending_paths.insert(cache.path.clone()) {
                     self.scan_discovered += 1;
                 }
@@ -661,7 +763,7 @@ impl App {
                 }
             }
             WorkerMessage::ScanMeasured(candidate) => {
-                let focused = self.focused_path();
+                let focused = self.focused_key();
                 self.scan_pending_paths.remove(&candidate.path);
                 self.scan_measured_paths.insert(candidate.path.clone());
                 self.remembered.remove(&candidate.path);
@@ -679,7 +781,7 @@ impl App {
                 self.rebuild_visible_preserving(focused.as_ref());
             }
             WorkerMessage::ScanSkipped(path) => {
-                let focused = self.focused_path();
+                let focused = self.focused_key();
                 self.scan_pending_paths.remove(&path);
                 self.remembered.remove(&path);
                 self.measuring.retain(|pending| pending.path != path);
@@ -687,7 +789,7 @@ impl App {
             }
             WorkerMessage::ScanWarning(warning) => self.warnings.push(warning),
             WorkerMessage::ScanFinished(Ok(report)) => {
-                let focused = self.focused_path();
+                let focused = self.focused_key();
                 self.candidates = report.candidates;
                 self.measuring.clear();
                 self.remembered.clear();
@@ -700,7 +802,7 @@ impl App {
                         .any(|candidate| candidate.path == *path)
                 });
                 self.rebuild_visible_preserving(focused.as_ref());
-                if self.candidates.is_empty() {
+                if self.candidates.is_empty() && self.native_resources.is_empty() {
                     self.toast = Some((
                         "No caches found — your disk is already tidy".to_owned(),
                         Instant::now(),
@@ -713,7 +815,7 @@ impl App {
                 self.measuring.clear();
                 self.remembered.clear();
                 self.scan_pending_paths.clear();
-                if self.candidates.is_empty() {
+                if self.candidates.is_empty() && self.native_resources.is_empty() {
                     self.phase = Phase::Failed;
                 } else {
                     self.phase = Phase::Ready;
@@ -727,6 +829,43 @@ impl App {
                     ));
                 }
                 self.refreshing = false;
+            }
+            WorkerMessage::NativeInspected(report) => {
+                let focused = self.focused_key();
+                self.native_resources = report.resources;
+                self.rebuild_visible_preserving(focused.as_ref());
+                if !self.native_resources.is_empty() && self.phase == Phase::Failed {
+                    self.phase = Phase::Ready;
+                    self.toast = Some((
+                        format!(
+                            "Filesystem scan failed — showing Docker storage · {}",
+                            self.error.as_deref().unwrap_or("unknown scan error")
+                        ),
+                        Instant::now(),
+                    ));
+                } else if !report.available
+                    && let Some(diagnostic) = report.diagnostics.first()
+                {
+                    self.toast = Some((
+                        format!("Docker storage unavailable · {}", diagnostic.message),
+                        Instant::now(),
+                    ));
+                } else if !report.diagnostics.is_empty() {
+                    self.toast = Some((
+                        format!(
+                            "{} Docker storage rows could not be read",
+                            report.diagnostics.len()
+                        ),
+                        Instant::now(),
+                    ));
+                } else if !self.native_resources.is_empty()
+                    && self
+                        .toast
+                        .as_ref()
+                        .is_some_and(|(message, _)| message.starts_with("No caches found"))
+                {
+                    self.toast = None;
+                }
             }
             WorkerMessage::Review {
                 result: Ok(candidates),
@@ -773,6 +912,13 @@ impl App {
 
     fn begin_delete(&mut self, tx: &Sender<WorkerMessage>) {
         self.focus_user_owned = true;
+        if self.selected.is_empty() && self.focused_native_index().is_some() {
+            self.toast = Some((
+                "Docker storage is inspection-only; no prune command was run".to_owned(),
+                Instant::now(),
+            ));
+            return;
+        }
         let candidates = if self.selected.is_empty() {
             let Some(index) = self.focused_index() else {
                 return;
@@ -1202,7 +1348,11 @@ fn render(frame: &mut Frame, app: &mut App) {
         .split(area);
     render_header(frame, sections[0], app);
     match app.phase {
-        Phase::Scanning if app.candidates.is_empty() && app.measuring.is_empty() => {
+        Phase::Scanning
+            if app.candidates.is_empty()
+                && app.measuring.is_empty()
+                && app.native_resources.is_empty() =>
+        {
             render_busy(frame, sections[1], app, "Sniffing out rebuildable caches");
         }
         Phase::Reviewing => render_workspace(frame, sections[1], app),
@@ -1233,6 +1383,18 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         _ => ("READY", palette.success),
     };
     let total_bytes: u64 = app.candidates.iter().map(|candidate| candidate.bytes).sum();
+    let native_reclaimable: u64 = app.native_resources.iter().fold(0_u64, |total, resource| {
+        total.saturating_add(resource.reclaimable_bytes)
+    });
+    let native_summary = if app.native_resources.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  {}  Docker {} reclaimable",
+            app.ui.separator().trim(),
+            format_bytes(native_reclaimable)
+        )
+    };
     let summary = if app.phase == Phase::Scanning {
         if app.refreshing {
             format!(
@@ -1266,10 +1428,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             )
         };
         format!(
-            "{} caches  {}  {} apparent{}",
+            "{} caches  {}  {} apparent{}{}",
             app.candidates.len(),
             app.ui.separator().trim(),
             format_bytes(total_bytes),
+            native_summary,
             warnings
         )
     };
@@ -1475,6 +1638,41 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         };
         Row::new(cells).style(Style::default().fg(palette.muted))
     }));
+    rows.extend(app.visible_native_resources().map(|resource| {
+        let marker = Cell::from(Span::styled(
+            if app.ui.unicode { "—" } else { "-" },
+            Style::default().fg(palette.muted),
+        ));
+        let size = Cell::from(format_bytes(resource.reclaimable_bytes))
+            .style(Style::default().fg(palette.info));
+        let age = if app.ui.unicode { "—" } else { "-" };
+        let cells = if compact {
+            vec![
+                marker,
+                size,
+                Cell::from(resource.kind.clone()),
+                Cell::from(resource.label.clone()),
+            ]
+        } else if medium {
+            vec![
+                marker,
+                size,
+                Cell::from(resource.kind.clone()),
+                Cell::from(age).style(Style::default().fg(palette.muted)),
+                Cell::from(resource.label.clone()),
+            ]
+        } else {
+            vec![
+                marker,
+                size,
+                Cell::from(resource.kind.clone()),
+                Cell::from(age).style(Style::default().fg(palette.muted)),
+                Cell::from("daemon").style(Style::default().fg(palette.muted)),
+                Cell::from(resource.label.clone()),
+            ]
+        };
+        Row::new(cells).style(Style::default().fg(palette.muted))
+    }));
     let selection = if app.selected.is_empty() {
         String::new()
     } else {
@@ -1487,7 +1685,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         )
     };
     let title = format!(
-        " Caches{}{}{}{}{}{} ",
+        " Storage{}{}{}{}{}{} ",
         app.ui.separator(),
         app.view_scope.label(),
         app.ui.separator(),
@@ -1501,7 +1699,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     let (headers, widths) = if compact {
         (
-            vec!["", "APPARENT", "KIND", "PATH"],
+            vec!["", "ESTIMATE", "KIND", "LOCATION"],
             vec![
                 Constraint::Length(2),
                 Constraint::Length(9),
@@ -1511,7 +1709,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         )
     } else if medium {
         (
-            vec!["", "APPARENT", "KIND", "AGE", "PATH"],
+            vec!["", "ESTIMATE", "KIND", "AGE", "LOCATION"],
             vec![
                 Constraint::Length(2),
                 Constraint::Length(10),
@@ -1522,7 +1720,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         )
     } else {
         (
-            vec!["", "APPARENT", "KIND", "AGE", "SCOPE", "PATH"],
+            vec!["", "ESTIMATE", "KIND", "AGE", "SCOPE", "LOCATION"],
             vec![
                 Constraint::Length(2),
                 Constraint::Length(10),
@@ -1640,8 +1838,75 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
+    if let Some(index) = app.focused_native_index() {
+        let resource = &app.native_resources[index];
+        let mut lines = vec![Line::from(Span::styled(
+            resource.label.clone(),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        if area.height >= 10 {
+            lines.push(Line::from(""));
+        }
+        lines.push(labeled("Usage", format_bytes(resource.bytes), palette));
+        lines.push(labeled(
+            "Reclaim",
+            format!(
+                "{} reported by Docker",
+                format_bytes(resource.reclaimable_bytes)
+            ),
+            palette,
+        ));
+        lines.push(labeled(
+            "Objects",
+            format!(
+                "{} active of {} total",
+                resource.active_count, resource.total_count
+            ),
+            palette,
+        ));
+        lines.push(labeled(
+            "Type",
+            format!(
+                "{}{}{}",
+                resource.provider,
+                app.ui.separator(),
+                resource.kind
+            ),
+            palette,
+        ));
+        if area.height >= 10 {
+            lines.push(labeled("Scope", "daemon".to_owned(), palette));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("Action   ", Style::default().fg(palette.muted)),
+            Span::styled(
+                if app.selected.is_empty() {
+                    "Inspection only; cleanup is not available".to_owned()
+                } else {
+                    format!(
+                        "Inspection only{}d deletes {} selected caches",
+                        app.ui.separator(),
+                        app.selected.len()
+                    )
+                },
+                Style::default().fg(palette.muted),
+            ),
+        ]));
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(detail_block(" Inspect ", app.ui)),
+            area,
+        );
+        return;
+    }
     let Some(index) = app.focused_index() else {
-        let message = if app.candidates.is_empty() && app.measuring.is_empty() {
+        let message = if app.candidates.is_empty()
+            && app.measuring.is_empty()
+            && app.native_resources.is_empty()
+        {
             "No caches found. Enjoy the breathing room.".to_owned()
         } else {
             "No caches match this view. Press Esc to clear the filter.".to_owned()
@@ -1874,6 +2139,29 @@ fn footer_shortcuts(app: &App, width: u16) -> Line<'static> {
                 Style::default().fg(palette.muted),
             ),
         ]);
+    }
+    if app.focused_native_index().is_some() {
+        let movement = if app.ui.unicode { "↑↓" } else { "jk" };
+        let mut spans = vec![key(movement, palette), hint("move", palette)];
+        if !app.selected.is_empty() {
+            spans.extend([key("d", palette), hint("delete selection", palette)]);
+        }
+        spans.extend([
+            key("/", palette),
+            hint("filter", palette),
+            key("tab", palette),
+            hint("scope", palette),
+        ]);
+        if width >= 110 {
+            spans.extend([
+                key("s", palette),
+                hint("sort", palette),
+                key("r", palette),
+                hint("rescan", palette),
+            ]);
+        }
+        spans.extend([key("?", palette), hint("help", palette)]);
+        return Line::from(spans);
     }
     if app.ui.unicode {
         footer_shortcuts_for_width(app, "↑↓", width)
@@ -2263,9 +2551,9 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             if app.phase == Phase::Scanning {
                 "Sizing rows can be inspected; cleanup unlocks when measurement finishes."
             } else if app.ui.unicode {
-                "× marks scan-only entries; select one explicitly to override."
+                "× can be overridden; — marks inspection-only Docker storage."
             } else {
-                "x marks scan-only entries; select one explicitly to override."
+                "x can be overridden; - marks inspection-only Docker storage."
             },
             Style::default().fg(palette.muted),
         )));
@@ -3108,19 +3396,95 @@ mod tests {
     }
 
     #[test]
+    fn docker_storage_is_visible_but_never_selectable_or_deletable() {
+        let mut app = test_app(options());
+        app.phase = Phase::Ready;
+        let (tx, _rx) = mpsc::channel();
+        app.handle_worker(
+            WorkerMessage::NativeInspected(NativeReport {
+                provider: "docker".to_owned(),
+                available: true,
+                resources: vec![NativeResource {
+                    provider: "docker".to_owned(),
+                    scope: "daemon".to_owned(),
+                    kind: "docker-build-cache".to_owned(),
+                    label: "Docker build cache".to_owned(),
+                    total_count: 12,
+                    active_count: 3,
+                    bytes: 4 * 1024 * 1024,
+                    reclaimable_bytes: 3 * 1024 * 1024,
+                    cleanable: false,
+                }],
+                diagnostics: Vec::new(),
+            }),
+            &tx,
+        );
+
+        assert_eq!(app.visible_len(), 1);
+        assert!(app.focused_native_index().is_some());
+        let output = render_text(&mut app, 100, 24);
+        assert!(output.contains("Docker build cache"), "{output}");
+        assert!(output.contains("3.0 MiB reported by Docker"), "{output}");
+        assert!(output.contains("Inspection only"), "{output}");
+        assert!(!output.contains("space select"), "{output}");
+        assert!(!output.contains("d delete"), "{output}");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &tx,
+        );
+        assert!(app.selected.is_empty());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Ready);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(message, _)| message.contains("no prune command was run"))
+        );
+    }
+
+    #[test]
+    fn project_scope_hides_daemon_storage() {
+        let mut app = test_app(options());
+        app.native_resources.push(NativeResource {
+            provider: "docker".to_owned(),
+            scope: "daemon".to_owned(),
+            kind: "docker-images".to_owned(),
+            label: "Docker images".to_owned(),
+            total_count: 1,
+            active_count: 0,
+            bytes: 1024,
+            reclaimable_bytes: 1024,
+            cleanable: false,
+        });
+        app.view_scope = ViewScope::Project;
+        app.rebuild_visible();
+
+        assert!(app.visible_native.is_empty());
+        app.view_scope = ViewScope::Global;
+        app.rebuild_visible();
+        assert_eq!(app.visible_native.len(), 1);
+    }
+
+    #[test]
     fn layouts_render_at_minimum_standard_and_wide_sizes() {
         let (_temp, _target, mut app) = project_app();
         let minimum = render_text(&mut app, 58, 16);
-        assert!(minimum.contains("Caches"));
+        assert!(minimum.contains("Storage"));
         assert!(minimum.contains("d delete"));
         assert!(!minimum.contains("Inspect"));
 
         let standard = render_text(&mut app, 80, 24);
-        assert!(standard.contains("Caches"));
+        assert!(standard.contains("Storage"));
         assert!(standard.contains("Inspect"));
 
         let wide = render_text(&mut app, 140, 40);
-        assert!(wide.contains("Caches"));
+        assert!(wide.contains("Storage"));
         assert!(wide.contains("Inspect"));
         assert!(wide.contains("Space select"));
         assert!(wide.contains("d delete"));

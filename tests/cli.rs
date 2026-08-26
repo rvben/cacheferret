@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -14,6 +16,19 @@ struct Output {
 
 fn run(args: &[&str]) -> Output {
     let out = Command::new(BIN).args(args).output().expect("spawn binary");
+    Output {
+        code: out.status.code().unwrap(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+    }
+}
+
+fn run_with_path(args: &[&str], path: &Path) -> Output {
+    let out = Command::new(BIN)
+        .args(args)
+        .env("PATH", path)
+        .output()
+        .expect("spawn binary");
     Output {
         code: out.status.code().unwrap(),
         stdout: String::from_utf8(out.stdout).unwrap(),
@@ -149,6 +164,65 @@ fn catalog_is_paginated_and_projectable() {
         assert!(item.get("kind").is_some());
         assert!(item.get("cleanable").is_some());
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_inspection_is_paginated_projectable_and_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let docker = temp.path().join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+printf '%s\n' \
+'{"Type":"Images","TotalCount":"12","Active":"3","Size":"1.5GB","Reclaimable":"750MB (50%)"}' \
+'{"Type":"Containers","TotalCount":"2","Active":"1","Size":"2MB","Reclaimable":"0B (0%)"}' \
+'{"Type":"Local Volumes","TotalCount":"4","Active":"2","Size":"700MB","Reclaimable":"500MB (71%)"}' \
+'{"Type":"Build Cache","TotalCount":"8","Active":"0","Size":"1GB","Reclaimable":"1GB (100%)"}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = run_with_path(
+        &[
+            "docker",
+            "--limit",
+            "2",
+            "--offset",
+            "1",
+            "--fields",
+            "kind,reclaimable_bytes",
+        ],
+        temp.path(),
+    );
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["provider"], "docker");
+    assert_eq!(value["available"], true);
+    assert_eq!(value["total"], 4);
+    assert_eq!(value["returned"], 2);
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["items"][0]["kind"], "docker-images");
+    assert_eq!(value["items"][0]["reclaimable_bytes"], 750_000_000_u64);
+    assert_eq!(value["items"][0].as_object().unwrap().len(), 2);
+    assert_eq!(value["items"][1]["kind"], "docker-volumes");
+    assert_eq!(value["diagnostics"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn missing_docker_is_a_structured_nonfatal_diagnostic() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = run_with_path(&["docker"], temp.path());
+
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["available"], false);
+    assert_eq!(value["total"], 0);
+    assert_eq!(value["diagnostics"][0]["provider"], "docker");
+    assert_eq!(value["diagnostics"][0]["kind"], "not_found");
+    assert_eq!(value["diagnostics"][0]["retryable"], false);
 }
 
 #[test]
