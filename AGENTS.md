@@ -49,14 +49,18 @@ be selectable or deletable.
    must not weaken JSON output, stable errors, schema introspection, pagination,
    field selection, stdout/stderr separation, or non-interactive confirmation.
 7. Be precise about what is rebuildable. Maven's local repository and the
-   shared renv cache are scan-only; Docker build data requires a future native
-   Docker integration rather than directory deletion.
+   shared renv cache are scan-only. Docker storage uses native inspection;
+   ordinary build cache alone has guarded native pruning, while images,
+   containers, volumes, and broader build records remain inspection-only.
 8. Avoid repeating the same state label within one region. During scanning the
    header should have one status label; supporting detail belongs in the body.
 
 ## Current release state
 
-- Current version: `0.4.2`.
+- Current source version: `0.5.0`.
+- Latest published version: `0.4.2`.
+- The `0.5.0` release candidate is prepared locally at `577283c`; it has not
+  been tagged, pushed, or published and requires explicit approval first.
 - Published to crates.io: <https://crates.io/crates/cacheferret>
 - Published to PyPI: <https://pypi.org/project/cacheferret/>
 - PyPI provides native x86_64/aarch64 wheels for macOS and manylinux2014 Linux,
