@@ -8,6 +8,17 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ### Added
 
+- TUI scans now show recognized caches as soon as they are discovered and
+  replace sizing rows with current measurements as background work completes.
+- A private warm-start scan index shows previously known paths immediately,
+  prioritizes their fresh measurement, and never allows stale data to authorize
+  cleanup.
+- Docker storage inspection now reports images, containers, volumes, and build
+  cache as separate daemon-scoped resources in the CLI, JSON, schema, and TUI.
+- Ordinary Docker build cache can now be selected in the TUI or pruned with
+  `cacheferret docker clean` after a fresh preview and mandatory confirmation.
+  Images, containers, volumes, broad system prune, and `builder prune --all`
+  remain outside the cleanup boundary.
 - Post-release smoke tests now install and execute the exact published version
   from GitHub archives, crates.io, PyPI, and Homebrew on native Intel/ARM macOS
   and Linux runners.
@@ -16,6 +27,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ### Fixed
 
+- Warm-start rows keep their unavailable action explanation visible in compact
+  layouts until fresh measurement makes selection safe.
 - The Homebrew formula now uses Homebrew's architecture-aware DSL so ARM Linux
   selects its published native archive instead of being rejected as unsupported.
 
