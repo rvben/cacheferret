@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/rvben/cacheferret/compare/v0.4.2...v0.5.0) - 2026-08-27
+
 ### Added
 
 - TUI scans now show recognized caches as soon as they are discovered and
