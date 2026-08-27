@@ -54,7 +54,7 @@ pub fn contract() -> Value {
             },
             {
                 "name": "docker",
-                "description": "Inspect Docker-managed storage without changing daemon state.",
+                "description": "Inspect Docker-managed storage without changing daemon state. Build-cache cleanup is available as docker clean.",
                 "effects": "read_only",
                 "mutating": false,
                 "cardinality": "unbounded",
@@ -69,6 +69,20 @@ pub fn contract() -> Value {
                 "errors": ["invalid_input"],
                 "stability": "stable",
                 "example": {"args": ["--fields", "kind,reclaimable_bytes"]}
+            },
+            {
+                "name": "docker clean",
+                "description": "Prune ordinary Docker build cache after a fresh preview and confirmation. Never prunes images, containers, volumes, or internal/frontend cache records selected by --all.",
+                "effects": "idempotent",
+                "mutating": true,
+                "cardinality": "single",
+                "confirmation_bypass_arg": "--yes",
+                "fields_arg": "--fields",
+                "args": native_clean_args(),
+                "output_fields": native_clean_fields(),
+                "errors": ["invalid_input", "confirmation_required", "native_unavailable", "native_protocol"],
+                "stability": "stable",
+                "example": {"args": ["--dry-run"]}
             },
             {
                 "name": "clean",
@@ -193,7 +207,9 @@ pub fn contract() -> Value {
             {"kind": "usage", "exit_code": 3, "retryable": false, "description": "The command-line invocation was invalid."},
             {"kind": "io", "exit_code": 4, "retryable": false, "description": "A local filesystem or process operation failed."},
             {"kind": "conflict", "exit_code": 5, "retryable": false, "description": "Every selected target changed or became unsafe before deletion."},
-            {"kind": "confirmation_required", "exit_code": 6, "retryable": false, "description": "Cleanup reached a confirmation gate without a TTY."}
+            {"kind": "confirmation_required", "exit_code": 6, "retryable": false, "description": "Cleanup reached a confirmation gate without a TTY."},
+            {"kind": "native_unavailable", "exit_code": 7, "retryable": true, "description": "A native provider executable, service, or operation was unavailable."},
+            {"kind": "native_protocol", "exit_code": 8, "retryable": false, "description": "A native provider returned data CacheFerret could not safely interpret."}
         ],
         "extensions": {
             "homepage": env!("CARGO_PKG_HOMEPAGE"),
@@ -278,6 +294,33 @@ fn native_inspection_args() -> Vec<Value> {
     ]
 }
 
+fn native_clean_args() -> Vec<Value> {
+    vec![
+        json!({"name": "--dry-run", "type": "boolean", "default": false, "description": "Freshly inspect and report the build-cache prune without changing Docker state."}),
+        json!({"name": "--yes", "short": "-y", "type": "boolean", "default": false, "description": "Confirm the build-cache prune non-interactively."}),
+        json!({"name": "--fields", "type": "string[]", "required": false, "description": "Report fields to include in structured output."}),
+    ]
+}
+
+fn native_clean_fields() -> Vec<Value> {
+    vec![
+        json!({"name": "provider", "type": "string", "enum": ["docker"]}),
+        json!({"name": "kind", "type": "string", "enum": ["docker-build-cache"]}),
+        json!({"name": "changed", "type": "boolean"}),
+        json!({"name": "dry_run", "type": "boolean"}),
+        json!({"name": "confirmed", "type": "boolean"}),
+        json!({"name": "before", "type": "object", "fields": native_resource_fields()}),
+        json!({"name": "after", "type": "object", "nullable": true, "fields": native_resource_fields()}),
+        json!({"name": "reported_reclaimed_bytes", "type": "integer", "nullable": true}),
+        json!({"name": "estimated_removed_bytes", "type": "integer"}),
+        json!({"name": "diagnostics", "type": "array", "items": {"type": "object", "fields": [
+            {"name": "provider", "type": "string"},
+            {"name": "kind", "type": "string"},
+            {"name": "message", "type": "string"}
+        ]}}),
+    ]
+}
+
 fn native_resource_fields() -> Vec<Value> {
     vec![
         json!({"name": "provider", "type": "string", "enum": ["docker"]}),
@@ -288,7 +331,7 @@ fn native_resource_fields() -> Vec<Value> {
         json!({"name": "active_count", "type": "integer"}),
         json!({"name": "bytes", "type": "integer"}),
         json!({"name": "reclaimable_bytes", "type": "integer"}),
-        json!({"name": "cleanable", "type": "boolean", "description": "Always false until a separately designed native cleanup flow is available."}),
+        json!({"name": "cleanable", "type": "boolean", "description": "True only for resource classes with a bounded, separately confirmed native cleanup flow. Currently Docker build cache only."}),
     ]
 }
 

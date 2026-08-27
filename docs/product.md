@@ -50,8 +50,8 @@ Users run it among source trees, package-manager stores, compiler output,
 virtual environments, and recognized temporary build storage. Bare
 `cacheferret` opens the TUI when stdin and stdout are terminals; when piped, the
 same command performs a read-only JSON scan. Explicit `tui`, `scan`, `clean`,
-`catalog`, `docker`, and `schema` commands support focused human and automated
-workflows.
+`catalog`, `docker`, `docker clean`, and `schema` commands support focused human
+and automated workflows.
 
 The TUI follows a familiar ncdu/gdu interaction model:
 
@@ -59,9 +59,9 @@ The TUI follows a familiar ncdu/gdu interaction model:
 | --- | --- |
 | Move | Arrow keys or `j`/`k` |
 | Select/unselect and advance | `Space` |
-| Select/unselect all visible caches | `a` |
-| Delete selection, or focused cache | `d` |
-| Confirm a risky delete | `y`; cancel with `n` or `Esc` |
+| Select/unselect all visible cleanable storage | `a` |
+| Clean selection, or focused item | `d` |
+| Confirm a risky cleanup | `y`; cancel with `n` or `Esc` |
 | Filter | `/` |
 | Cycle all/project/global scope | `Tab` |
 | Cycle size/age/name sorting | `s` |
@@ -104,10 +104,16 @@ When global storage is in scope and cache-kind filters are not active, Docker
 inspection runs independently of the filesystem scan. Images, containers,
 volumes, and build cache appear after filesystem cache rows, ordered by
 Docker-reported reclaimable bytes. They use daemon scope, never fake paths,
-never enter the selection set, and always keep their inspection-only action
-visible in compact layouts. Missing, stopped, remote, permission-denied, slow,
-or malformed Docker responses degrade to bounded diagnostics without failing
-the filesystem scan.
+and always keep their action visible in compact layouts. Ordinary build cache
+is the only selectable Docker resource; images, containers, volumes, and
+broader internal/frontend build records remain inspection-only. Build-cache
+cleanup always requires confirmation, refreshes Docker's estimate before the
+prompt and immediately before mutation, and runs only
+`docker builder prune --force` without `--all`. Mixed filesystem and
+build-cache selections use one confirmation while keeping their measurements
+separate. Missing, stopped, remote, permission-denied, slow, or malformed
+Docker responses degrade to bounded diagnostics without failing the filesystem
+scan.
 
 ### Storage accounting
 
@@ -153,6 +159,12 @@ identity, containment, kind, ownership markers, and symlink policy. Temporary
 trees that require quiescence must also match their fresh safety fingerprint.
 A changed or unsafe target produces a conflict instead of being removed.
 
+Docker build-cache cleanup is deliberately stricter than ordinary low-risk
+directory cleanup because it is shared daemon state and restoration may require
+downloads. It always asks once, even for a small estimate. The CLI equivalent
+is `cacheferret docker clean`; non-interactive callers must use `--yes`, and
+agents can preview the same output contract with `--dry-run`.
+
 ### Product boundaries
 
 In scope:
@@ -163,7 +175,8 @@ In scope:
 - Disk-usage discovery, filtering, sorting, inspection, focused deletion, and
   rapid batch selection.
 - Safe preview and cleanup for scripts.
-- Read-only Docker storage inspection in the TUI, text output, and JSON.
+- Docker storage inspection plus guarded ordinary build-cache pruning in the
+  TUI, text output, and JSON.
 - Human-readable terminal output and clispec.dev v0.3 JSON behavior.
 - macOS and Linux on x86_64 and aarch64.
 
@@ -174,8 +187,8 @@ Out of scope unless deliberately designed later:
 - Implicitly or batch-selecting state that may be the only copy of user-created
   artifacts.
 - Treating arbitrary system-temporary contents as caches.
-- Treating Docker storage as ordinary directories, or enabling Docker cleanup
-  before resource-specific revalidation and prune semantics are designed.
+- Treating Docker storage as ordinary directories; pruning images, containers,
+  volumes, or internal/frontend build records; or running broad system prune.
 - Claiming Windows support before discovery rules, terminal behavior, tests,
   and packaging are intentionally supported.
 
@@ -267,7 +280,8 @@ successful build.
   Linux for GitHub archives, crates.io, PyPI, and Homebrew.
 - Continue polishing navigation, focus continuity, responsive terminal
   layouts, copy, and visual identity based on real terminal use.
-- Design resource-specific Docker prune operations with refreshed previews,
-  proportional confirmation, and final native revalidation.
+- Evaluate whether any additional native cleanup class can be bounded as
+  precisely as Docker's ordinary build cache; keep images, containers, and
+  volumes inspection-only until that evidence exists.
 - Consider Windows only as a complete platform effort, not merely another
   wheel target.

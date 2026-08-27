@@ -36,6 +36,56 @@ fn run_with_path(args: &[&str], path: &Path) -> Output {
     }
 }
 
+#[cfg(unix)]
+fn docker_clean_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let docker = temp.path().join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "system df")
+    if [ -f "$CACHEFERRET_TEST_STATE" ]; then
+      printf '%s\n' '{"Type":"Build Cache","TotalCount":"1","Active":"0","Size":"250MB","Reclaimable":"0B (0%)"}'
+    else
+      printf '%s\n' '{"Type":"Build Cache","TotalCount":"8","Active":"0","Size":"1GB","Reclaimable":"750MB (75%)"}'
+    fi
+    ;;
+  "builder prune")
+    printf '%s\n' "$*" > "$CACHEFERRET_TEST_LOG"
+    : > "$CACHEFERRET_TEST_STATE"
+    printf '%s\n' 'Total reclaimed space: 750MB'
+    ;;
+  *)
+    printf '%s\n' "unexpected docker invocation: $*" >&2
+    exit 42
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+    let state = temp.path().join("pruned");
+    let log = temp.path().join("argv");
+    (temp, state, log)
+}
+
+#[cfg(unix)]
+fn run_docker_clean(args: &[&str], temp: &TempDir, state: &Path, log: &Path) -> Output {
+    let out = Command::new(BIN)
+        .args(args)
+        .env("PATH", temp.path())
+        .env("CACHEFERRET_TEST_STATE", state)
+        .env("CACHEFERRET_TEST_LOG", log)
+        .output()
+        .expect("spawn binary");
+    Output {
+        code: out.status.code().unwrap(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+    }
+}
+
 fn error_envelope(stderr: &str) -> serde_json::Value {
     let last = stderr.lines().last().expect("stderr has an error line");
     serde_json::from_str::<serde_json::Value>(last).expect("error envelope is JSON")["error"]
@@ -223,6 +273,111 @@ fn missing_docker_is_a_structured_nonfatal_diagnostic() {
     assert_eq!(value["diagnostics"][0]["provider"], "docker");
     assert_eq!(value["diagnostics"][0]["kind"], "not_found");
     assert_eq!(value["diagnostics"][0]["retryable"], false);
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_dry_run_previews_without_pruning() {
+    let (temp, state, log) = docker_clean_fixture();
+    let out = run_docker_clean(
+        &[
+            "docker",
+            "clean",
+            "--dry-run",
+            "--fields",
+            "kind,dry_run,before",
+        ],
+        &temp,
+        &state,
+        &log,
+    );
+
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stderr.is_empty());
+    assert!(!state.exists());
+    assert!(!log.exists());
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 3);
+    assert_eq!(value["kind"], "docker-build-cache");
+    assert_eq!(value["dry_run"], true);
+    assert_eq!(value["before"]["reclaimable_bytes"], 750_000_000_u64);
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_requires_confirmation_when_piped() {
+    let (temp, state, log) = docker_clean_fixture();
+    let out = run_docker_clean(&["docker", "clean"], &temp, &state, &log);
+
+    assert_eq!(out.code, 6);
+    let error = error_envelope(&out.stderr);
+    assert_eq!(error["kind"], "confirmation_required");
+    assert_eq!(error["retryable"], false);
+    assert!(!state.exists());
+    assert!(!log.exists());
+}
+
+#[test]
+fn docker_clean_reports_missing_docker_as_retryable_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = run_with_path(&["docker", "clean", "--dry-run"], temp.path());
+
+    assert_eq!(out.code, 7);
+    let error = error_envelope(&out.stderr);
+    assert_eq!(error["kind"], "native_unavailable");
+    assert_eq!(error["retryable"], true);
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_yes_executes_only_bounded_build_cache_prune() {
+    let (temp, state, log) = docker_clean_fixture();
+    let out = run_docker_clean(&["docker", "clean", "--yes"], &temp, &state, &log);
+
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(state.exists());
+    assert_eq!(
+        fs::read_to_string(log).unwrap().trim(),
+        "builder prune --force"
+    );
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["confirmed"], true);
+    assert_eq!(value["changed"], true);
+    assert_eq!(value["reported_reclaimed_bytes"], 750_000_000_u64);
+    assert_eq!(value["after"]["reclaimable_bytes"], 0);
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_zero_reclaimable_is_a_confirmation_free_noop() {
+    let (temp, state, log) = docker_clean_fixture();
+    fs::write(&state, []).unwrap();
+    let out = run_docker_clean(&["docker", "clean"], &temp, &state, &log);
+
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(!log.exists());
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["confirmed"], true);
+    assert_eq!(value["changed"], false);
+    assert_eq!(value["before"]["reclaimable_bytes"], 0);
+}
+
+#[test]
+fn schema_describes_guarded_docker_clean() {
+    let out = run(&["schema", "docker", "clean"]);
+    assert_eq!(out.code, 0);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["commands"].as_array().unwrap().len(), 1);
+    let command = &value["commands"][0];
+    assert_eq!(command["name"], "docker clean");
+    assert_eq!(command["mutating"], true);
+    assert_eq!(command["confirmation_bypass_arg"], "--yes");
+    assert!(
+        command["description"]
+            .as_str()
+            .unwrap()
+            .contains("Never prunes images")
+    );
 }
 
 #[test]

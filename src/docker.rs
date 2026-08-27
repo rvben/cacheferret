@@ -6,29 +6,28 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::{NativeDiagnostic, NativeReport, NativeResource};
+use crate::{NativeCleanReport, NativeDiagnostic, NativeReport, NativeResource};
 
 const PROVIDER: &str = "docker";
 const INSPECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const PRUNE_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
 
 /// Inspect Docker-managed storage without changing daemon state.
 pub fn inspect_docker() -> NativeReport {
-    let output = match run_system_df() {
+    let output = match run_docker_command(
+        &["system", "df", "--format", "json"],
+        INSPECTION_TIMEOUT,
+        "storage inspection",
+    ) {
         Ok(output) => output,
         Err(diagnostic) => return unavailable(diagnostic),
     };
 
     if !output.status.success() {
-        let detail = diagnostic_text(&output.stderr);
-        let message = if detail.is_empty() {
-            format!("Docker storage inspection exited with {}", output.status)
-        } else {
-            detail
-        };
-        return unavailable(diagnostic(classify_failure(&message), message, true));
+        return unavailable(command_failure("storage inspection", &output));
     }
 
     let mut resources = Vec::new();
@@ -97,6 +96,78 @@ pub fn inspect_docker() -> NativeReport {
     }
 }
 
+/// Return a fresh Docker build-cache preview suitable for a confirmation gate.
+pub fn preview_docker_build_cache() -> Result<NativeResource, NativeDiagnostic> {
+    let report = inspect_docker();
+    if !report.available {
+        return Err(report.diagnostics.into_iter().next().unwrap_or_else(|| {
+            diagnostic(
+                "unavailable",
+                "Docker build cache could not be inspected".to_owned(),
+                true,
+            )
+        }));
+    }
+    report
+        .resources
+        .into_iter()
+        .find(|resource| resource.kind == "docker-build-cache")
+        .ok_or_else(|| {
+            diagnostic(
+                "missing_class",
+                "Docker did not report build-cache storage".to_owned(),
+                false,
+            )
+        })
+}
+
+/// Revalidate and prune Docker's ordinary build cache, excluding the broader
+/// internal/frontend cache included by Docker's `--all` option.
+pub fn prune_docker_build_cache() -> Result<NativeCleanReport, NativeDiagnostic> {
+    let before = preview_docker_build_cache()?;
+    if before.reclaimable_bytes == 0 {
+        return Ok(NativeCleanReport::preview(before, false, true));
+    }
+
+    let output = run_docker_command(
+        &["builder", "prune", "--force"],
+        PRUNE_TIMEOUT,
+        "build-cache prune",
+    )?;
+    if !output.status.success() {
+        return Err(command_failure("build-cache prune", &output));
+    }
+
+    let reported_reclaimed_bytes =
+        parse_reclaimed_bytes(&output.stdout).or_else(|| parse_reclaimed_bytes(&output.stderr));
+    let mut diagnostics = Vec::new();
+    let after = match preview_docker_build_cache() {
+        Ok(resource) => Some(resource),
+        Err(diagnostic) => {
+            diagnostics.push(diagnostic);
+            None
+        }
+    };
+    let estimated_removed_bytes = after
+        .as_ref()
+        .map_or(0, |resource| before.bytes.saturating_sub(resource.bytes));
+    let changed =
+        reported_reclaimed_bytes.is_some_and(|bytes| bytes > 0) || estimated_removed_bytes > 0;
+
+    Ok(NativeCleanReport {
+        provider: PROVIDER.to_owned(),
+        kind: "docker-build-cache".to_owned(),
+        changed,
+        dry_run: false,
+        confirmed: true,
+        before,
+        after,
+        reported_reclaimed_bytes,
+        estimated_removed_bytes,
+        diagnostics,
+    })
+}
+
 struct ProcessOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
@@ -108,10 +179,14 @@ enum ReadOutputError {
     TooLarge,
 }
 
-fn run_system_df() -> Result<ProcessOutput, NativeDiagnostic> {
+fn run_docker_command(
+    args: &[&str],
+    timeout: Duration,
+    action: &str,
+) -> Result<ProcessOutput, NativeDiagnostic> {
     let started = Instant::now();
     let mut child = Command::new("docker")
-        .args(["system", "df", "--format", "json"])
+        .args(args)
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -127,7 +202,7 @@ fn run_system_df() -> Result<ProcessOutput, NativeDiagnostic> {
             } else {
                 (
                     "unavailable",
-                    format!("Docker storage inspection could not start: {error}"),
+                    format!("Docker {action} could not start: {error}"),
                     true,
                 )
             };
@@ -142,13 +217,16 @@ fn run_system_df() -> Result<ProcessOutput, NativeDiagnostic> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < INSPECTION_TIMEOUT => thread::sleep(POLL_INTERVAL),
+            Ok(None) if started.elapsed() < timeout => thread::sleep(POLL_INTERVAL),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(diagnostic(
                     "timeout",
-                    "Docker storage inspection timed out after 5 seconds".to_owned(),
+                    format!(
+                        "Docker {action} timed out after {} seconds",
+                        timeout.as_secs()
+                    ),
                     true,
                 ));
             }
@@ -157,16 +235,16 @@ fn run_system_df() -> Result<ProcessOutput, NativeDiagnostic> {
                 let _ = child.wait();
                 return Err(diagnostic(
                     "unavailable",
-                    format!("Docker storage inspection could not be observed: {error}"),
+                    format!("Docker {action} could not be observed: {error}"),
                     true,
                 ));
             }
         }
     };
 
-    let deadline = started + INSPECTION_TIMEOUT;
-    let stdout = receive_reader(stdout_reader, "stdout", deadline)?;
-    let stderr = receive_reader(stderr_reader, "stderr", deadline)?;
+    let deadline = started + timeout;
+    let stdout = receive_reader(stdout_reader, "stdout", deadline, action, timeout)?;
+    let stderr = receive_reader(stderr_reader, "stderr", deadline, action, timeout)?;
     Ok(ProcessOutput {
         status,
         stdout,
@@ -199,6 +277,8 @@ fn receive_reader(
     reader: Receiver<Result<Vec<u8>, ReadOutputError>>,
     stream: &str,
     deadline: Instant,
+    action: &str,
+    timeout: Duration,
 ) -> Result<Vec<u8>, NativeDiagnostic> {
     match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(Ok(output)) => Ok(output),
@@ -214,7 +294,10 @@ fn receive_reader(
         )),
         Err(RecvTimeoutError::Timeout) => Err(diagnostic(
             "timeout",
-            "Docker storage inspection timed out after 5 seconds".to_owned(),
+            format!(
+                "Docker {action} timed out after {} seconds",
+                timeout.as_secs()
+            ),
             true,
         )),
         Err(RecvTimeoutError::Disconnected) => Err(diagnostic(
@@ -244,7 +327,7 @@ fn parse_resource(line: &str) -> Result<NativeResource, String> {
         active_count: integer_field(object, "Active")?,
         bytes: size_field(object, "Size")?,
         reclaimable_bytes: reclaimable_field(object, "Reclaimable")?,
-        cleanable: false,
+        cleanable: kind == "docker-build-cache",
     })
 }
 
@@ -323,6 +406,34 @@ fn parse_size(value: &str) -> Result<u64, String> {
         return Err(format!("size {value:?} is out of range"));
     }
     Ok(bytes.round() as u64)
+}
+
+fn parse_reclaimed_bytes(output: &[u8]) -> Option<u64> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let line = line.trim();
+            let lower = line.to_ascii_lowercase();
+            ["total reclaimed space:", "total:"]
+                .into_iter()
+                .find_map(|prefix| {
+                    lower
+                        .strip_prefix(prefix)
+                        .and_then(|_| line.get(prefix.len()..))
+                        .and_then(|value| parse_size(value.trim()).ok())
+                })
+        })
+}
+
+fn command_failure(action: &str, output: &ProcessOutput) -> NativeDiagnostic {
+    let detail = diagnostic_text(&output.stderr);
+    let message = if detail.is_empty() {
+        format!("Docker {action} exited with {}", output.status)
+    } else {
+        detail
+    };
+    diagnostic(classify_failure(&message), message, true)
 }
 
 fn unavailable(diagnostic: NativeDiagnostic) -> NativeReport {
@@ -416,7 +527,7 @@ mod tests {
             assert_eq!(resource.kind, kind);
             assert_eq!(resource.bytes, bytes);
             assert_eq!(resource.reclaimable_bytes, reclaimable_bytes);
-            assert!(!resource.cleanable);
+            assert_eq!(resource.cleanable, kind == "docker-build-cache");
         }
     }
 
@@ -451,9 +562,29 @@ mod tests {
     #[test]
     fn output_collection_obeys_the_shared_deadline() {
         let (_tx, rx) = mpsc::channel::<Result<Vec<u8>, ReadOutputError>>();
-        let error = receive_reader(rx, "stdout", Instant::now()).unwrap_err();
+        let error = receive_reader(
+            rx,
+            "stdout",
+            Instant::now(),
+            "storage inspection",
+            INSPECTION_TIMEOUT,
+        )
+        .unwrap_err();
         assert_eq!(error.kind, "timeout");
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn parses_optional_owner_reported_reclaimed_space() {
+        assert_eq!(
+            parse_reclaimed_bytes(b"Total reclaimed space: 1.5GB\n"),
+            Some(1_500_000_000)
+        );
+        assert_eq!(
+            parse_reclaimed_bytes(b"ID\tRECLAIMABLE\nTotal:\t2MiB\n"),
+            Some(2 * 1024 * 1024)
+        );
+        assert_eq!(parse_reclaimed_bytes(b"prune complete\n"), None);
     }
 
     #[test]

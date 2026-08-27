@@ -17,6 +17,15 @@ pub enum Error {
     #[error("confirmation is required before cleaning {count} cache directories")]
     ConfirmationRequired { count: usize },
 
+    #[error("confirmation is required before pruning {provider} {kind}")]
+    NativeConfirmationRequired { provider: String, kind: String },
+
+    #[error("{provider} operation is unavailable: {message}")]
+    NativeUnavailable { provider: String, message: String },
+
+    #[error("{provider} returned unsupported output: {message}")]
+    NativeProtocol { provider: String, message: String },
+
     #[error("cleanup conflicted with filesystem changes: {message}")]
     Conflict { message: String },
 
@@ -33,7 +42,11 @@ impl Error {
         match self {
             Error::Usage { .. } => "usage",
             Error::InvalidInput { .. } | Error::InvalidPath { .. } => "invalid_input",
-            Error::ConfirmationRequired { .. } => "confirmation_required",
+            Error::ConfirmationRequired { .. } | Error::NativeConfirmationRequired { .. } => {
+                "confirmation_required"
+            }
+            Error::NativeUnavailable { .. } => "native_unavailable",
+            Error::NativeProtocol { .. } => "native_protocol",
             Error::Conflict { .. } => "conflict",
             Error::Io { .. } => "io",
         }
@@ -44,7 +57,15 @@ impl Error {
             Error::Usage { .. } => Some("see `cacheferret --help` or `cacheferret schema`"),
             Error::InvalidInput { .. } => Some("check the accepted values in `cacheferret schema`"),
             Error::InvalidPath { .. } => Some("pass an existing directory with --root"),
-            Error::ConfirmationRequired { .. } => Some("re-run with --yes to confirm cleanup"),
+            Error::ConfirmationRequired { .. } | Error::NativeConfirmationRequired { .. } => {
+                Some("re-run with --yes to confirm cleanup")
+            }
+            Error::NativeUnavailable { .. } => {
+                Some("check the native tool, daemon, endpoint, and permissions, then retry")
+            }
+            Error::NativeProtocol { .. } => {
+                Some("check the supported native tool version and run the inspection command")
+            }
             Error::Conflict { .. } => Some("scan again and review the changed targets"),
             Error::Io { .. } => {
                 Some("check permissions and whether another process is using the path")
@@ -58,7 +79,13 @@ impl Error {
             Error::Usage { .. } => 3,
             Error::Io { .. } => 4,
             Error::Conflict { .. } => 5,
-            Error::ConfirmationRequired { .. } => 6,
+            Error::ConfirmationRequired { .. } | Error::NativeConfirmationRequired { .. } => 6,
+            Error::NativeUnavailable { .. } => 7,
+            Error::NativeProtocol { .. } => 8,
         }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, Error::NativeUnavailable { .. })
     }
 }

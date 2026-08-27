@@ -1,14 +1,16 @@
 # Native cleanup integrations
 
-CacheFerret currently deletes recognized directory candidates itself. It
+CacheFerret deletes recognized directory candidates itself. It
 remeasures the selected tree, checks its identity and ownership markers, and
-then removes exactly that path. It does not currently invoke package-manager or
-daemon cleanup commands.
+then removes exactly that path. Docker ordinary build cache is the first
+daemon-owned exception and uses Docker's own bounded prune operation.
 
-Docker is the first read-only native adapter. `cacheferret docker` invokes a
+Docker is the first native adapter. `cacheferret docker` invokes a
 bounded `docker system df --format json` inspection and exposes the result in
-text, JSON, the offline schema, and the TUI. It does not implement Docker
-revalidation or cleanup yet.
+text, JSON, the offline schema, and the TUI. `cacheferret docker clean` refreshes
+the ordinary build-cache estimate, always requires confirmation unless `--yes`
+is explicit, revalidates again, and invokes only `docker builder prune --force`.
+It never uses `--all` or any system-, image-, container-, or volume-prune action.
 
 That remains the right default for disposable build trees such as Cargo
 `target/`, `node_modules`, CMake build directories, and Python bytecode. The
@@ -37,7 +39,7 @@ text output, and JSON schema.
 
 | Storage owner | Native inspection or cleanup | CacheFerret direction |
 | --- | --- | --- |
-| Docker | [`docker system df`](https://docs.docker.com/reference/cli/docker/system/df/), plus resource-specific `docker builder/image/container/volume prune` commands | Native integration required. Never delete Docker's data root. Prefer separately selectable resource classes over a default `docker system prune --volumes`. |
+| Docker | [`docker system df`](https://docs.docker.com/reference/cli/docker/system/df/), plus resource-specific `docker builder/image/container/volume prune` commands | Ordinary build-cache prune is implemented. Never delete Docker's data root; keep other classes inspection-only until each boundary is designed. |
 | Homebrew | [`brew cleanup --dry-run` and `brew cleanup`](https://docs.brew.sh/Manpage#cleanup-options-formulacask) | Good native-prune candidate because Homebrew owns download, version, and lock-file state. Keep autoremove separate from cache cleanup. |
 | pip | [`pip cache info`, `remove`, and `purge`](https://pip.pypa.io/en/stable/cli/pip_cache/) | A whole-cache action can use pip. Exact subdirectories can remain direct only while their boundaries are stable and validated. |
 | uv | [`uv cache clean` and `uv cache prune`](https://docs.astral.sh/uv/concepts/cache/#clearing-the-cache) | Prefer `prune` for garbage collection; expose full clean as the broader, download-backed action. |
@@ -90,11 +92,13 @@ treat as ordinary directories.
 2. Build cache, images, containers, and volumes are represented as
    distinct native resources with native-reported total and reclaimable bytes.
 3. JSON and TUI presentation ship before mutation. Daemon resources never use
-   fake filesystem paths and remain non-selectable.
-4. Add resource-specific prune operations with refreshed previews and the same
-   proportional confirmation policy used for directory candidates.
-5. Consider a combined system prune only as an explicit advanced action;
-   volumes remain separately selected and confirmed.
+   fake filesystem paths.
+4. Ordinary build cache is separately selectable and uses refreshed previews,
+   mandatory confirmation, final native revalidation, and the bounded
+   `docker builder prune --force` operation. This is implemented.
+5. Images, containers, volumes, and `builder prune --all` records remain
+   inspection-only. A combined system prune is outside the current product
+   boundary.
 
 This requires a native-resource model alongside `CacheCandidate`, not an
 exception that weakens the directory scanner's closed catalog.

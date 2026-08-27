@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use cacheferret::{
     CacheCandidate, CacheScope, CleanReport, DiscoveredCache, DiscoveryEvent, DiscoveryOptions,
-    Error, NativeReport, NativeResource, ScanReport, ScopeFilter, clean_candidates,
-    discover_with_progress_prioritized, format_bytes, format_signed_bytes, inspect_docker,
+    Error, NativeCleanReport, NativeDiagnostic, NativeReport, NativeResource, ScanReport,
+    ScopeFilter, clean_candidates, discover_with_progress_prioritized, format_bytes,
+    format_signed_bytes, inspect_docker, preview_docker_build_cache, prune_docker_build_cache,
     refresh_candidate,
 };
 use crossterm::cursor;
@@ -262,10 +263,14 @@ enum WorkerMessage {
     ScanFinished(Result<ScanReport, Error>),
     NativeInspected(NativeReport),
     Review {
-        result: Result<Vec<CacheCandidate>, Error>,
+        candidates: Result<Vec<CacheCandidate>, Error>,
+        native: Option<Result<NativeResource, NativeDiagnostic>>,
         confirmed: bool,
     },
-    Clean(CleanReport),
+    Clean {
+        filesystem: CleanReport,
+        native: Box<Option<Result<NativeCleanReport, NativeDiagnostic>>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,10 +301,13 @@ struct App {
     view_scope: ViewScope,
     sort: SortOrder,
     selected: HashSet<PathBuf>,
+    selected_native: HashSet<String>,
     show_help: bool,
     scan_started: Instant,
     pending_delete: Vec<CacheCandidate>,
+    pending_native: Option<NativeResource>,
     deleting: Vec<PathBuf>,
+    deleting_native: bool,
     error: Option<String>,
     toast: Option<(String, Instant)>,
     should_quit: bool,
@@ -352,10 +360,13 @@ impl App {
             view_scope: ViewScope::All,
             sort: SortOrder::Size,
             selected: HashSet::new(),
+            selected_native: HashSet::new(),
             show_help: false,
             scan_started: Instant::now(),
             pending_delete: Vec::new(),
+            pending_native: None,
             deleting: Vec::new(),
+            deleting_native: false,
             error: None,
             toast: None,
             should_quit: false,
@@ -582,19 +593,46 @@ impl App {
     }
 
     fn selected_bytes(&self) -> u64 {
-        self.candidates
+        let filesystem: u64 = self
+            .candidates
             .iter()
             .filter(|candidate| self.selected.contains(&candidate.path))
             .map(|candidate| candidate.bytes)
-            .sum()
+            .sum();
+        let native: u64 = self
+            .native_resources
+            .iter()
+            .filter(|resource| self.selected_native.contains(&resource.kind))
+            .map(|resource| resource.reclaimable_bytes)
+            .sum();
+        filesystem.saturating_add(native)
+    }
+
+    fn selected_count(&self) -> usize {
+        self.selected.len() + self.selected_native.len()
+    }
+
+    fn selected_native_resource(&self) -> Option<NativeResource> {
+        self.native_resources
+            .iter()
+            .find(|resource| self.selected_native.contains(&resource.kind))
+            .cloned()
     }
 
     fn toggle_focused_selection(&mut self) {
-        if self.focused_native_index().is_some() {
-            self.toast = Some((
-                "Docker storage is inspection-only; cleanup is not available yet".to_owned(),
-                Instant::now(),
-            ));
+        if let Some(index) = self.focused_native_index() {
+            let resource = &self.native_resources[index];
+            if !resource.cleanable {
+                self.toast = Some((
+                    "This Docker resource is inspection-only".to_owned(),
+                    Instant::now(),
+                ));
+                return;
+            }
+            if !self.selected_native.remove(&resource.kind) {
+                self.selected_native.insert(resource.kind.clone());
+            }
+            self.move_cursor(1);
             return;
         }
         let Some(index) = self.focused_index() else {
@@ -616,10 +654,7 @@ impl App {
     fn toggle_scanning_selection(&mut self) {
         self.focus_user_owned = true;
         if self.focused_native_index().is_some() {
-            self.toast = Some((
-                "Docker storage is inspection-only; cleanup is not available yet".to_owned(),
-                Instant::now(),
-            ));
+            self.toggle_focused_selection();
             return;
         }
         if self.focused_measuring_index().is_some() {
@@ -651,20 +686,34 @@ impl App {
             .filter(|candidate| candidate.cleanable)
             .map(|candidate| candidate.path.clone())
             .collect();
-        if visible.is_empty() {
+        let visible_native: Vec<String> = self
+            .visible_native
+            .iter()
+            .map(|index| &self.native_resources[*index])
+            .filter(|resource| resource.cleanable)
+            .map(|resource| resource.kind.clone())
+            .collect();
+        if visible.is_empty() && visible_native.is_empty() {
             self.toast = Some((
                 "No deletable caches in this view".to_owned(),
                 Instant::now(),
             ));
             return;
         }
-        let all_selected = visible.iter().all(|path| self.selected.contains(path));
+        let all_selected = visible.iter().all(|path| self.selected.contains(path))
+            && visible_native
+                .iter()
+                .all(|kind| self.selected_native.contains(kind));
         if all_selected {
             for path in visible {
                 self.selected.remove(&path);
             }
+            for kind in visible_native {
+                self.selected_native.remove(&kind);
+            }
         } else {
             self.selected.extend(visible);
+            self.selected_native.extend(visible_native);
         }
     }
 
@@ -698,8 +747,11 @@ impl App {
         self.scan_measured_paths.clear();
         self.warnings.clear();
         self.selected.clear();
+        self.selected_native.clear();
         self.pending_delete.clear();
+        self.pending_native = None;
         self.deleting.clear();
+        self.deleting_native = false;
         self.error = None;
         self.toast = None;
         self.rebuild_visible_preserving(focused.as_ref());
@@ -833,6 +885,11 @@ impl App {
             WorkerMessage::NativeInspected(report) => {
                 let focused = self.focused_key();
                 self.native_resources = report.resources;
+                self.selected_native.retain(|kind| {
+                    self.native_resources
+                        .iter()
+                        .any(|resource| resource.kind == *kind && resource.cleanable)
+                });
                 self.rebuild_visible_preserving(focused.as_ref());
                 if !self.native_resources.is_empty() && self.phase == Phase::Failed {
                     self.phase = Phase::Ready;
@@ -868,9 +925,27 @@ impl App {
                 }
             }
             WorkerMessage::Review {
-                result: Ok(candidates),
+                candidates: Ok(candidates),
+                native,
                 confirmed,
             } => {
+                let native = match native {
+                    Some(Ok(resource)) => Some(resource),
+                    Some(Err(diagnostic)) => {
+                        self.phase = Phase::Ready;
+                        self.deleting.clear();
+                        self.deleting_native = false;
+                        self.toast = Some((
+                            format!(
+                                "Docker build cache changed; try again · {}",
+                                diagnostic.message
+                            ),
+                            Instant::now(),
+                        ));
+                        return;
+                    }
+                    None => None,
+                };
                 for candidate in &candidates {
                     if let Some(current) = self
                         .candidates
@@ -880,31 +955,103 @@ impl App {
                         *current = candidate.clone();
                     }
                 }
+                if let Some(resource) = &native
+                    && let Some(current) = self
+                        .native_resources
+                        .iter_mut()
+                        .find(|current| current.kind == resource.kind)
+                {
+                    *current = resource.clone();
+                }
+                let native = native.and_then(|resource| {
+                    if resource.reclaimable_bytes == 0 {
+                        self.selected_native.remove(&resource.kind);
+                        None
+                    } else {
+                        Some(resource)
+                    }
+                });
                 self.rebuild_visible();
-                if confirmed || batch_risk_reasons(&candidates).is_empty() {
-                    self.delete_candidates(candidates, tx);
+                if candidates.is_empty() && native.is_none() {
+                    self.phase = Phase::Ready;
+                    self.deleting.clear();
+                    self.deleting_native = false;
+                    self.toast = Some((
+                        "Docker build cache is already clean".to_owned(),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                if confirmed || (native.is_none() && batch_risk_reasons(&candidates).is_empty()) {
+                    self.delete_operation(candidates, native, tx);
                 } else {
                     self.pending_delete = candidates;
+                    self.pending_native = native;
                     self.phase = Phase::Confirming;
                 }
             }
             WorkerMessage::Review {
-                result: Err(error), ..
+                candidates: Err(error),
+                ..
             } => {
                 self.phase = Phase::Ready;
+                self.deleting.clear();
+                self.deleting_native = false;
                 self.toast = Some((
                     format!("Cache changed; scan again · {error}"),
                     Instant::now(),
                 ));
             }
-            WorkerMessage::Clean(report) => {
-                let cleaned: HashSet<PathBuf> = report.cleaned_paths.iter().cloned().collect();
+            WorkerMessage::Clean { filesystem, native } => {
+                let native = *native;
+                let cleaned: HashSet<PathBuf> = filesystem.cleaned_paths.iter().cloned().collect();
                 self.candidates
                     .retain(|candidate| !cleaned.contains(&candidate.path));
                 self.selected.retain(|path| !cleaned.contains(path));
+                let native_message = match native {
+                    Some(Ok(report)) => {
+                        self.selected_native.remove(&report.kind);
+                        if let Some(after) = report.after
+                            && let Some(current) = self
+                                .native_resources
+                                .iter_mut()
+                                .find(|resource| resource.kind == after.kind)
+                        {
+                            *current = after;
+                        }
+                        Some(if report.changed {
+                            format!(
+                                "Pruned Docker build cache · {} reported",
+                                format_bytes(
+                                    report
+                                        .reported_reclaimed_bytes
+                                        .unwrap_or(report.estimated_removed_bytes)
+                                )
+                            )
+                        } else {
+                            "Docker build cache already clean".to_owned()
+                        })
+                    }
+                    Some(Err(diagnostic)) => Some(format!(
+                        "Docker build-cache prune failed · {}",
+                        diagnostic.message
+                    )),
+                    None => None,
+                };
                 self.deleting.clear();
+                self.deleting_native = false;
                 self.phase = Phase::Ready;
-                self.toast = Some((cleanup_message(&report), Instant::now()));
+                let message = match (filesystem.selected, native_message) {
+                    (0, Some(native)) => native,
+                    (_, Some(native)) => format!(
+                        "{}{}{}",
+                        cleanup_message(&filesystem),
+                        self.ui.separator(),
+                        native
+                    ),
+                    (_, None) => cleanup_message(&filesystem),
+                };
+                self.toast = Some((message, Instant::now()));
                 self.rebuild_visible();
             }
         }
@@ -912,51 +1059,69 @@ impl App {
 
     fn begin_delete(&mut self, tx: &Sender<WorkerMessage>) {
         self.focus_user_owned = true;
-        if self.selected.is_empty() && self.focused_native_index().is_some() {
-            self.toast = Some((
-                "Docker storage is inspection-only; no prune command was run".to_owned(),
-                Instant::now(),
-            ));
-            return;
-        }
-        let candidates = if self.selected.is_empty() {
-            let Some(index) = self.focused_index() else {
-                return;
-            };
-            let candidate = self.candidates[index].clone();
-            if !candidate.cleanable {
-                self.toast = Some((
-                    "Select this scan-only cache with Space to override".to_owned(),
-                    Instant::now(),
-                ));
-                return;
+        let has_selection = !self.selected.is_empty() || !self.selected_native.is_empty();
+        let mut native = if has_selection {
+            self.selected_native_resource()
+        } else {
+            None
+        };
+        let candidates = if !has_selection {
+            if let Some(index) = self.focused_native_index() {
+                let resource = self.native_resources[index].clone();
+                if !resource.cleanable {
+                    self.toast = Some((
+                        "This Docker resource is inspection-only; no prune command was run"
+                            .to_owned(),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                native = Some(resource);
+                Vec::new()
+            } else {
+                let Some(index) = self.focused_index() else {
+                    return;
+                };
+                let candidate = self.candidates[index].clone();
+                if !candidate.cleanable {
+                    self.toast = Some((
+                        "Select this scan-only cache with Space to override".to_owned(),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                vec![candidate]
             }
-            vec![candidate]
         } else {
             self.selected_candidates()
         };
-        if !candidates.is_empty() {
-            self.review_candidates(candidates, false, tx);
+        if !candidates.is_empty() || native.is_some() {
+            self.review_operation(candidates, native, false, tx);
         }
     }
 
     fn confirm_delete(&mut self, tx: &Sender<WorkerMessage>) {
-        if self.pending_delete.is_empty() {
+        if self.pending_delete.is_empty() && self.pending_native.is_none() {
             self.phase = Phase::Ready;
             return;
         }
         let candidates = std::mem::take(&mut self.pending_delete);
-        self.review_candidates(candidates, true, tx);
+        let native = self.pending_native.take();
+        self.review_operation(candidates, native, true, tx);
     }
 
     fn cancel_delete(&mut self) {
         self.pending_delete.clear();
+        self.pending_native = None;
+        self.deleting.clear();
+        self.deleting_native = false;
         self.phase = Phase::Ready;
     }
 
-    fn review_candidates(
+    fn review_operation(
         &mut self,
         candidates: Vec<CacheCandidate>,
+        native: Option<NativeResource>,
         confirmed: bool,
         tx: &Sender<WorkerMessage>,
     ) {
@@ -966,19 +1131,26 @@ impl App {
             .iter()
             .map(|candidate| candidate.path.clone())
             .collect();
+        self.deleting_native = native.is_some();
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let result = candidates
+            let candidates = candidates
                 .iter()
                 .map(|candidate| refresh_candidate(candidate, RECENT_DAYS))
                 .collect();
-            let _ = tx.send(WorkerMessage::Review { result, confirmed });
+            let native = native.map(|_| preview_docker_build_cache());
+            let _ = tx.send(WorkerMessage::Review {
+                candidates,
+                native,
+                confirmed,
+            });
         });
     }
 
-    fn delete_candidates(
+    fn delete_operation(
         &mut self,
         mut candidates: Vec<CacheCandidate>,
+        native: Option<NativeResource>,
         tx: &Sender<WorkerMessage>,
     ) {
         for candidate in &mut candidates {
@@ -992,9 +1164,15 @@ impl App {
             .iter()
             .map(|candidate| candidate.path.clone())
             .collect();
+        self.deleting_native = native.is_some();
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(WorkerMessage::Clean(clean_candidates(&candidates, false)));
+            let filesystem = clean_candidates(&candidates, false);
+            let native = native.map(|_| prune_docker_build_cache());
+            let _ = tx.send(WorkerMessage::Clean {
+                filesystem,
+                native: Box::new(native),
+            });
         });
     }
 }
@@ -1639,9 +1817,22 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         Row::new(cells).style(Style::default().fg(palette.muted))
     }));
     rows.extend(app.visible_native_resources().map(|resource| {
+        let is_selected = app.selected_native.contains(&resource.kind);
         let marker = Cell::from(Span::styled(
-            if app.ui.unicode { "—" } else { "-" },
-            Style::default().fg(palette.muted),
+            if is_selected {
+                if app.ui.unicode { "✓" } else { "x" }
+            } else if resource.cleanable {
+                " "
+            } else if app.ui.unicode {
+                "—"
+            } else {
+                "-"
+            },
+            Style::default().fg(if is_selected {
+                palette.success
+            } else {
+                palette.muted
+            }),
         ));
         let size = Cell::from(format_bytes(resource.reclaimable_bytes))
             .style(Style::default().fg(palette.info));
@@ -1671,15 +1862,23 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
                 Cell::from(resource.label.clone()),
             ]
         };
-        Row::new(cells).style(Style::default().fg(palette.muted))
+        Row::new(cells).style(if is_selected {
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD)
+        } else if resource.cleanable {
+            Style::default().fg(palette.text)
+        } else {
+            Style::default().fg(palette.muted)
+        })
     }));
-    let selection = if app.selected.is_empty() {
+    let selection = if app.selected_count() == 0 {
         String::new()
     } else {
         format!(
             "{}{} selected{}{}",
             app.ui.separator(),
-            app.selected.len(),
+            app.selected_count(),
             app.ui.separator(),
             format_bytes(app.selected_bytes())
         )
@@ -1879,19 +2078,41 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
         if area.height >= 10 {
             lines.push(labeled("Scope", "daemon".to_owned(), palette));
         }
+        let selected = app.selected_native.contains(&resource.kind);
+        let action = if resource.cleanable {
+            if selected {
+                format!(
+                    "selected{}Space unselect{}d prune",
+                    app.ui.separator(),
+                    app.ui.separator()
+                )
+            } else if app.selected_count() > 0 {
+                format!(
+                    "Space select{}d clean {} selected",
+                    app.ui.separator(),
+                    app.selected_count()
+                )
+            } else {
+                format!("Space select{}d prune", app.ui.separator())
+            }
+        } else if app.selected_count() > 0 {
+            format!(
+                "Inspection only{}d cleans {} selected",
+                app.ui.separator(),
+                app.selected_count()
+            )
+        } else {
+            "Inspection only".to_owned()
+        };
         lines.push(Line::from(vec![
             Span::styled("Action   ", Style::default().fg(palette.muted)),
             Span::styled(
-                if app.selected.is_empty() {
-                    "Inspection only; cleanup is not available".to_owned()
+                action,
+                Style::default().fg(if resource.cleanable {
+                    palette.accent
                 } else {
-                    format!(
-                        "Inspection only{}d deletes {} selected caches",
-                        app.ui.separator(),
-                        app.selected.len()
-                    )
-                },
-                Style::default().fg(palette.muted),
+                    palette.muted
+                }),
             ),
         ]));
         frame.render_widget(
@@ -1960,7 +2181,7 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(palette.muted),
         )
     } else {
-        let value = match (selected, app.selected.len()) {
+        let value = match (selected, app.selected_count()) {
             (true, 1) => format!("selected{separator}Space unselect{separator}d delete"),
             (true, count) => {
                 format!("selected{separator}Space unselect{separator}d delete {count}")
@@ -2143,8 +2364,14 @@ fn footer_shortcuts(app: &App, width: u16) -> Line<'static> {
     if app.focused_native_index().is_some() {
         let movement = if app.ui.unicode { "↑↓" } else { "jk" };
         let mut spans = vec![key(movement, palette), hint("move", palette)];
-        if !app.selected.is_empty() {
-            spans.extend([key("d", palette), hint("delete selection", palette)]);
+        let native_cleanable = app
+            .focused_native_index()
+            .is_some_and(|index| app.native_resources[index].cleanable);
+        if native_cleanable {
+            spans.extend([key("space", palette), hint("select", palette)]);
+        }
+        if app.selected_count() > 0 || native_cleanable {
+            spans.extend([key("d", palette), hint("clean", palette)]);
         }
         spans.extend([
             key("/", palette),
@@ -2187,7 +2414,11 @@ fn scanning_shortcuts(app: &App, width: u16) -> Line<'static> {
         ]);
     }
     let mut spans = vec![key(movement, palette), hint("move", palette)];
-    if app.focused_index().is_some() {
+    if app.focused_index().is_some()
+        || app
+            .focused_native_index()
+            .is_some_and(|index| app.native_resources[index].cleanable)
+    {
         spans.extend([key("space", palette), hint("select", palette)]);
     }
     spans.extend([
@@ -2324,7 +2555,14 @@ fn render_error(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_reviewing(frame: &mut Frame, area: Rect, app: &App) {
-    let detail = if app.deleting.len() > 1 {
+    let detail = if app.deleting_native && app.deleting.is_empty() {
+        "Refreshing Docker's build-cache estimate before prune".to_owned()
+    } else if app.deleting_native {
+        format!(
+            "Remeasuring {} filesystem caches and Docker build cache",
+            app.deleting.len()
+        )
+    } else if app.deleting.len() > 1 {
         format!(
             "Remeasuring {} selected caches before delete",
             app.deleting.len()
@@ -2343,12 +2581,19 @@ fn render_reviewing(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
-    if app.pending_delete.is_empty() {
+    if app.pending_delete.is_empty() && app.pending_native.is_none() {
         return;
     }
     let palette = app.ui.palette;
     let modal = centered_box(76, 11, area);
-    let reasons = batch_risk_reasons(&app.pending_delete).join(app.ui.separator());
+    let mut reasons = batch_risk_reasons(&app.pending_delete);
+    if app.pending_native.is_some() {
+        reasons.push("shared daemon");
+        if !reasons.contains(&"download restore") {
+            reasons.push("download restore");
+        }
+    }
+    let reasons = reasons.join(app.ui.separator());
     let bytes: u64 = app
         .pending_delete
         .iter()
@@ -2360,7 +2605,16 @@ fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
         .map(|candidate| candidate.allocated_bytes)
         .sum();
     let count = app.pending_delete.len();
-    let (question, subject) = if count == 1 {
+    let native_bytes = app
+        .pending_native
+        .as_ref()
+        .map_or(0, |resource| resource.reclaimable_bytes);
+    let (question, subject) = if count == 0 && app.pending_native.is_some() {
+        (
+            "Prune Docker build cache?".to_owned(),
+            "Only ordinary build cache; images, containers, and volumes stay untouched".to_owned(),
+        )
+    } else if count == 1 && app.pending_native.is_none() {
         let candidate = &app.pending_delete[0];
         (
             format!("Delete {}?", candidate.kind),
@@ -2370,10 +2624,16 @@ fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
                 app.ui.unicode,
             ),
         )
-    } else {
+    } else if app.pending_native.is_none() {
         (
             format!("Delete {count} selected caches?"),
             "Every target will be checked again immediately before removal".to_owned(),
+        )
+    } else {
+        let total = count + usize::from(app.pending_native.is_some());
+        (
+            format!("Clean {total} selected storage items?"),
+            "Every target is checked again immediately before cleanup".to_owned(),
         )
     };
     frame.render_widget(Clear, modal);
@@ -2390,12 +2650,23 @@ fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(""),
             Line::from(vec![
                 Span::styled(
-                    format!(
-                        "{} apparent  {}  {} allocated",
-                        format_bytes(bytes),
-                        app.ui.separator().trim(),
-                        format_bytes(allocated_bytes)
-                    ),
+                    if app.pending_native.is_some() && app.pending_delete.is_empty() {
+                        format!("{} Docker reclaimable", format_bytes(native_bytes))
+                    } else if app.pending_native.is_some() {
+                        format!(
+                            "{} filesystem  {}  {} Docker reclaimable",
+                            format_bytes(bytes),
+                            app.ui.separator().trim(),
+                            format_bytes(native_bytes)
+                        )
+                    } else {
+                        format!(
+                            "{} apparent  {}  {} allocated",
+                            format_bytes(bytes),
+                            app.ui.separator().trim(),
+                            format_bytes(allocated_bytes)
+                        )
+                    },
                     Style::default()
                         .fg(palette.accent)
                         .add_modifier(Modifier::BOLD),
@@ -2414,7 +2685,7 @@ fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
                         .fg(palette.bg)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" delete    ", Style::default().fg(palette.text)),
+                Span::styled(" clean     ", Style::default().fg(palette.text)),
                 Span::styled(
                     " n / Esc ",
                     Style::default().bg(palette.surface_active).fg(palette.text),
@@ -2441,7 +2712,15 @@ fn render_cleaning(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         "Working..."
     };
-    let detail = if app.deleting.len() > 1 {
+    let detail = if app.deleting_native && app.deleting.is_empty() {
+        "Docker build cache".into()
+    } else if app.deleting_native {
+        format!(
+            "{} filesystem caches + Docker build cache",
+            app.deleting.len()
+        )
+        .into()
+    } else if app.deleting.len() > 1 {
         format!("{} selected caches", app.deleting.len()).into()
     } else {
         app.deleting
@@ -2449,7 +2728,7 @@ fn render_cleaning(frame: &mut Frame, area: Rect, app: &App) {
             .and_then(|path| path.file_name())
             .map_or_else(|| fallback.into(), |name| name.to_string_lossy())
     };
-    render_progress_modal(frame, area, app, "Deleting cache", &detail, " Delete ");
+    render_progress_modal(frame, area, app, "Cleaning storage", &detail, " Clean ");
 }
 
 fn render_progress_modal(
@@ -2501,7 +2780,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             ("Up/Down j/k", "Move"),
             ("Space", "Select and move down"),
             ("a", "Select/unselect visible"),
-            ("d", "Delete selection or focused cache"),
+            ("d", "Clean selection or focused item"),
             ("/", "Filter"),
             ("Tab", "Cycle scope"),
             ("s", "Cycle sort"),
@@ -2513,7 +2792,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             ("↑ / ↓  j / k", "Move through caches"),
             ("Space", "Select or unselect, then move down"),
             ("a", "Select or unselect all visible caches"),
-            ("d", "Delete selected caches, or the focused cache"),
+            ("d", "Clean selected storage, or the focused item"),
             ("/", "Filter by path, kind, or ecosystem"),
             ("Tab", "Cycle all, project, and global caches"),
             ("s", "Cycle size, age, and name sorting"),
@@ -2526,7 +2805,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         vec![
             Line::from(Span::styled(
-                "Space builds a batch; d deletes it.",
+                "Space builds a batch; d cleans it.",
                 Style::default()
                     .fg(palette.text)
                     .add_modifier(Modifier::BOLD),
@@ -2551,9 +2830,9 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             if app.phase == Phase::Scanning {
                 "Sizing rows can be inspected; cleanup unlocks when measurement finishes."
             } else if app.ui.unicode {
-                "× can be overridden; — marks inspection-only Docker storage."
+                "× override · Docker build cache confirms · — other Docker rows inspect-only."
             } else {
-                "x can be overridden; - marks inspection-only Docker storage."
+                "x override | Docker build cache confirms | - other Docker rows inspect-only."
             },
             Style::default().fg(palette.muted),
         )));
@@ -3396,7 +3675,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_storage_is_visible_but_never_selectable_or_deletable() {
+    fn docker_inspection_only_storage_cannot_be_selected_or_deleted() {
         let mut app = test_app(options());
         app.phase = Phase::Ready;
         let (tx, _rx) = mpsc::channel();
@@ -3407,8 +3686,8 @@ mod tests {
                 resources: vec![NativeResource {
                     provider: "docker".to_owned(),
                     scope: "daemon".to_owned(),
-                    kind: "docker-build-cache".to_owned(),
-                    label: "Docker build cache".to_owned(),
+                    kind: "docker-images".to_owned(),
+                    label: "Docker images".to_owned(),
                     total_count: 12,
                     active_count: 3,
                     bytes: 4 * 1024 * 1024,
@@ -3423,7 +3702,7 @@ mod tests {
         assert_eq!(app.visible_len(), 1);
         assert!(app.focused_native_index().is_some());
         let output = render_text(&mut app, 100, 24);
-        assert!(output.contains("Docker build cache"), "{output}");
+        assert!(output.contains("Docker images"), "{output}");
         assert!(output.contains("3.0 MiB reported by Docker"), "{output}");
         assert!(output.contains("Inspection only"), "{output}");
         assert!(!output.contains("space select"), "{output}");
@@ -3446,6 +3725,64 @@ mod tests {
                 .as_ref()
                 .is_some_and(|(message, _)| message.contains("no prune command was run"))
         );
+    }
+
+    #[test]
+    fn docker_build_cache_is_selectable_and_always_confirmed() {
+        let mut app = test_app(options());
+        app.phase = Phase::Ready;
+        let (tx, _rx) = mpsc::channel();
+        let resource = NativeResource {
+            provider: "docker".to_owned(),
+            scope: "daemon".to_owned(),
+            kind: "docker-build-cache".to_owned(),
+            label: "Docker build cache".to_owned(),
+            total_count: 12,
+            active_count: 3,
+            bytes: 4 * 1024 * 1024,
+            reclaimable_bytes: 3 * 1024 * 1024,
+            cleanable: true,
+        };
+        app.handle_worker(
+            WorkerMessage::NativeInspected(NativeReport {
+                provider: "docker".to_owned(),
+                available: true,
+                resources: vec![resource.clone()],
+                diagnostics: Vec::new(),
+            }),
+            &tx,
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &tx,
+        );
+        assert!(app.selected_native.contains("docker-build-cache"));
+        let selected = render_text(&mut app, 100, 24);
+        assert!(selected.contains("1 selected"), "{selected}");
+        assert!(selected.contains("d prune"), "{selected}");
+
+        app.handle_worker(
+            WorkerMessage::Review {
+                candidates: Ok(Vec::new()),
+                native: Some(Ok(resource)),
+                confirmed: false,
+            },
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Confirming);
+        let confirmation = render_text(&mut app, 80, 24);
+        assert!(
+            confirmation.contains("Prune Docker build cache?"),
+            "{confirmation}"
+        );
+        assert!(
+            confirmation.contains("images, containers, and volumes stay untouched"),
+            "{confirmation}"
+        );
+        assert!(confirmation.contains("download restore"), "{confirmation}");
+        assert!(confirmation.contains("d / y"), "{confirmation}");
     }
 
     #[test]
@@ -3511,7 +3848,7 @@ mod tests {
             "Up/Down j/k",
             "Select and move down",
             "Select/unselect visible",
-            "Delete selection or focused cache",
+            "Clean selection or focused item",
             "Cycle scope",
             "Cycle sort",
             "Press ? or Esc to close",

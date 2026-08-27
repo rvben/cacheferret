@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cacheferret::{
-    CacheCandidate, CleanReport, DiscoveryOptions, Error, NativeReport, NativeResource,
-    OutputFormat, ScopeFilter, clean_candidates, default_roots, discover, format_bytes,
-    format_signed_bytes, inspect_docker, schema,
+    CacheCandidate, CleanReport, DiscoveryOptions, Error, NativeCleanReport, NativeDiagnostic,
+    NativeReport, NativeResource, OutputFormat, ScopeFilter, clean_candidates, default_roots,
+    discover, format_bytes, format_signed_bytes, inspect_docker, preview_docker_build_cache,
+    prune_docker_build_cache, schema,
 };
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -129,6 +130,21 @@ struct ScanArgs {
 
 #[derive(Debug, Clone, Args)]
 struct DockerArgs {
+    #[command(subcommand)]
+    command: Option<DockerCommand>,
+
+    #[command(flatten)]
+    inspection: DockerInspectionArgs,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum DockerCommand {
+    /// Prune ordinary Docker build cache after a fresh preview and confirmation.
+    Clean(DockerCleanArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct DockerInspectionArgs {
     /// Maximum records returned in this page.
     #[arg(long, default_value_t = 100, value_parser = parse_limit)]
     limit: usize,
@@ -138,6 +154,21 @@ struct DockerArgs {
     offset: usize,
 
     /// Native resource fields to include. Comma-separated or repeatable.
+    #[arg(long, value_delimiter = ',', value_name = "FIELD")]
+    fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct DockerCleanArgs {
+    /// Preview the build-cache prune without changing Docker state.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Confirm the build-cache prune non-interactively.
+    #[arg(long, short = 'y')]
+    yes: bool,
+
+    /// Report fields to include in structured output.
     #[arg(long, value_delimiter = ',', value_name = "FIELD")]
     fields: Vec<String>,
 }
@@ -248,7 +279,16 @@ fn main() -> ExitCode {
         }
         Some(Command::Catalog(args)) => run_catalog(args, format),
         Some(Command::Scan(args)) => run_scan(args, format),
-        Some(Command::Docker(args)) => run_docker(args, format),
+        Some(Command::Docker(args)) => {
+            let DockerArgs {
+                command,
+                inspection,
+            } = args;
+            match command {
+                Some(DockerCommand::Clean(args)) => run_docker_clean(args, format),
+                None => run_docker(inspection, format),
+            }
+        }
         Some(Command::Clean(args)) => run_clean(args, format),
         None if cli.output == CliOutput::Auto
             && std::io::stdin().is_terminal()
@@ -271,7 +311,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_docker(args: DockerArgs, format: OutputFormat) -> Result<String, Error> {
+fn run_docker(args: DockerInspectionArgs, format: OutputFormat) -> Result<String, Error> {
     validate_field_set(&args.fields, &NATIVE_RESOURCE_FIELDS)?;
     let report = inspect_docker();
     let total = report.resources.len();
@@ -305,6 +345,73 @@ fn run_docker(args: DockerArgs, format: OutputFormat) -> Result<String, Error> {
         }
         OutputFormat::Text => render_docker_text(&report, page, end < total),
     })
+}
+
+fn run_docker_clean(args: DockerCleanArgs, format: OutputFormat) -> Result<String, Error> {
+    validate_field_set(&args.fields, &NATIVE_CLEAN_FIELDS)?;
+    let before = preview_docker_build_cache().map_err(native_error)?;
+    let report = if args.dry_run {
+        NativeCleanReport::preview(before, true, false)
+    } else if before.reclaimable_bytes == 0 {
+        NativeCleanReport::preview(before, false, true)
+    } else {
+        let confirmed = if args.yes {
+            true
+        } else if !std::io::stdin().is_terminal() {
+            return Err(Error::NativeConfirmationRequired {
+                provider: "Docker".to_owned(),
+                kind: "build cache".to_owned(),
+            });
+        } else {
+            prompt_for_docker_confirmation(&before)?
+        };
+        if confirmed {
+            prune_docker_build_cache().map_err(native_error)?
+        } else {
+            NativeCleanReport::preview(before, false, false)
+        }
+    };
+    Ok(render_docker_clean(&report, format, &args.fields))
+}
+
+fn native_error(diagnostic: NativeDiagnostic) -> Error {
+    if matches!(
+        diagnostic.kind.as_str(),
+        "invalid_output" | "duplicate_output" | "missing_class" | "empty_output"
+    ) {
+        Error::NativeProtocol {
+            provider: diagnostic.provider,
+            message: diagnostic.message,
+        }
+    } else {
+        Error::NativeUnavailable {
+            provider: diagnostic.provider,
+            message: diagnostic.message,
+        }
+    }
+}
+
+fn prompt_for_docker_confirmation(resource: &NativeResource) -> Result<bool, Error> {
+    eprint!(
+        "Prune Docker build cache ({} reclaimable of {} used)? Rebuilding may require downloads. [y/N] ",
+        format_bytes(resource.reclaimable_bytes),
+        format_bytes(resource.bytes)
+    );
+    std::io::stderr().flush().map_err(|source| Error::Io {
+        path: PathBuf::from("<stderr>"),
+        source,
+    })?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| Error::Io {
+            path: PathBuf::from("<stdin>"),
+            source,
+        })?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn run_tui(args: TuiArgs, output: CliOutput) -> ExitCode {
@@ -637,6 +744,54 @@ fn render_docker_text(report: &NativeReport, page: &[NativeResource], truncated:
     lines.join("\n")
 }
 
+fn render_docker_clean(
+    report: &NativeCleanReport,
+    format: OutputFormat,
+    fields: &[String],
+) -> String {
+    match format {
+        OutputFormat::Json => {
+            let value = serde_json::to_value(report).expect("native clean report serializes");
+            project_object(value, fields).to_string()
+        }
+        OutputFormat::Text => {
+            let mut lines = if report.dry_run {
+                vec![format!(
+                    "Would prune Docker build cache · {} reclaimable of {} used · rebuilding may require downloads",
+                    format_bytes(report.before.reclaimable_bytes),
+                    format_bytes(report.before.bytes)
+                )]
+            } else if report.before.reclaimable_bytes == 0 {
+                vec!["Docker build cache is already clean; nothing changed".to_owned()]
+            } else if !report.confirmed {
+                vec!["Docker build-cache prune cancelled; nothing changed".to_owned()]
+            } else if let Some(bytes) = report.reported_reclaimed_bytes {
+                vec![format!(
+                    "Pruned Docker build cache · {} reported reclaimed",
+                    format_bytes(bytes)
+                )]
+            } else if report.estimated_removed_bytes > 0 {
+                vec![format!(
+                    "Pruned Docker build cache · {} estimated removed",
+                    format_bytes(report.estimated_removed_bytes)
+                )]
+            } else {
+                vec![
+                    "Docker build-cache prune completed; no reclaimed bytes were reported"
+                        .to_owned(),
+                ]
+            };
+            lines.extend(
+                report
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| format!("Diagnostic: {}", diagnostic.message)),
+            );
+            lines.join("\n")
+        }
+    }
+}
+
 fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -> String {
     match format {
         OutputFormat::Json => {
@@ -763,6 +918,19 @@ const NATIVE_RESOURCE_FIELDS: [&str; 9] = [
     "reclaimable_bytes",
     "cleanable",
     "scope",
+];
+
+const NATIVE_CLEAN_FIELDS: [&str; 10] = [
+    "provider",
+    "kind",
+    "changed",
+    "dry_run",
+    "confirmed",
+    "before",
+    "after",
+    "reported_reclaimed_bytes",
+    "estimated_removed_bytes",
+    "diagnostics",
 ];
 
 const CLEAN_FIELDS: [&str; 19] = [
@@ -916,6 +1084,7 @@ fn emit_error(error: &Error, format: OutputFormat) {
             body.insert("kind".to_owned(), json!(error.kind()));
             body.insert("message".to_owned(), json!(error.to_string()));
             body.insert("exit_code".to_owned(), json!(error.exit_code()));
+            body.insert("retryable".to_owned(), json!(error.retryable()));
             if let Some(hint) = error.hint() {
                 body.insert("hint".to_owned(), json!(hint));
             }

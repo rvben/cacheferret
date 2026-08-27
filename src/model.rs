@@ -144,6 +144,38 @@ pub struct NativeReport {
     pub diagnostics: Vec<NativeDiagnostic>,
 }
 
+/// Result of a Docker-owned build-cache preview or prune operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativeCleanReport {
+    pub provider: String,
+    pub kind: String,
+    pub changed: bool,
+    pub dry_run: bool,
+    pub confirmed: bool,
+    pub before: NativeResource,
+    pub after: Option<NativeResource>,
+    pub reported_reclaimed_bytes: Option<u64>,
+    pub estimated_removed_bytes: u64,
+    pub diagnostics: Vec<NativeDiagnostic>,
+}
+
+impl NativeCleanReport {
+    pub fn preview(before: NativeResource, dry_run: bool, confirmed: bool) -> Self {
+        Self {
+            provider: before.provider.clone(),
+            kind: before.kind.clone(),
+            changed: false,
+            dry_run,
+            confirmed,
+            before,
+            after: None,
+            reported_reclaimed_bytes: None,
+            estimated_removed_bytes: 0,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
 impl NativeReport {
     pub fn total_bytes(&self) -> u64 {
         self.resources

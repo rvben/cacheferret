@@ -14,12 +14,12 @@ pub mod schema;
 
 pub use catalog::{catalog, default_roots};
 pub use cleaner::clean_candidates;
-pub use docker::inspect_docker;
+pub use docker::{inspect_docker, preview_docker_build_cache, prune_docker_build_cache};
 pub use error::Error;
 pub use model::{
     CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveredCache,
-    DiscoveryEvent, DiscoveryOptions, FilesystemSpaceDelta, NativeDiagnostic, NativeReport,
-    NativeResource, OutputFormat, ScanReport, ScopeFilter,
+    DiscoveryEvent, DiscoveryOptions, FilesystemSpaceDelta, NativeCleanReport, NativeDiagnostic,
+    NativeReport, NativeResource, OutputFormat, ScanReport, ScopeFilter,
 };
 pub use scanner::{
     discover, discover_with_progress, discover_with_progress_prioritized, refresh_candidate,

@@ -48,6 +48,12 @@ cacheferret scan --root ~/Projects --scope project
 # Inspect Docker-managed storage without pruning anything
 cacheferret docker
 
+# Preview the bounded Docker build-cache cleanup
+cacheferret docker clean --dry-run
+
+# Confirm Docker build-cache cleanup from a script or agent
+cacheferret docker clean --yes
+
 # Preview old project caches that are eligible for cleanup
 cacheferret clean --root ~/Projects --dry-run
 
@@ -69,6 +75,8 @@ single compact `y`/`n` prompt. Press `?` for the complete shortcut guide.
 Catalog entries marked scan-only are excluded from focused deletion, `a` batch
 selection, and CLI cleanup. Select one individually with `Space` to request a
 manual override; `d` then requires confirmation and repeats the safety checks.
+Docker build cache participates in the same selection model and always asks for
+confirmation. Docker images, containers, and volumes remain inspection-only.
 
 After a successful TUI scan, CacheFerret keeps a small private snapshot of known
 cache paths. Later launches show those paths immediately with approximate prior
@@ -125,9 +133,11 @@ cacheferret docker --fields kind,reclaimable_bytes |
 - `--dry-run` follows the same discovery and eligibility policy without
   deleting anything, and lists every selected path with its apparent size,
   allocated-block estimate, and restore requirements.
-- Docker storage is inspected through a bounded, read-only native command. Its
-  daemon-scoped rows are never selectable and CacheFerret does not run a Docker
-  prune command.
+- Docker storage is inspected through a bounded native command. Only ordinary
+  build cache is selectable. Cleanup refreshes the estimate before confirmation
+  and again before mutation, then runs exactly `docker builder prune --force`.
+  CacheFerret never adds `--all`, never runs `docker system prune`, and never
+  prunes images, containers, or volumes.
 
 CacheFerret reports storage in three deliberately separate layers:
 
@@ -175,10 +185,11 @@ release covers:
 
 Docker build data is intentionally not treated as a directory cache.
 `cacheferret docker` uses `docker system df` to report images, containers,
-volumes, and build cache as distinct inspection-only resources. The TUI shows
-the same daemon-scoped rows when global storage is in scope. No prune command is
-implemented yet. The bounded adapter contract and the native cleanup
-opportunities for other package managers are documented in
+volumes, and build cache as distinct native resources. The TUI shows the same
+daemon-scoped rows when global storage is in scope. Ordinary build cache alone
+can be selected and pruned; every prune gets a fresh preview and explicit
+confirmation. The bounded adapter contract and native cleanup opportunities for
+other package managers are documented in
 [docs/native-cleanup.md](docs/native-cleanup.md).
 
 The Maven local repository is scan-only because it may contain unpublished
@@ -199,7 +210,8 @@ temporary entries remain protected unless `--include-recent` is supplied.
 | `cacheferret` | Open the TUI on a terminal; scan as JSON when piped |
 | `cacheferret tui` | Open the interactive browser with optional discovery filters |
 | `cacheferret scan` | Scan with root, scope, kind, pagination, and field controls |
-| `cacheferret docker` | Inspect Docker storage with pagination and field controls; never prune |
+| `cacheferret docker` | Inspect Docker storage with pagination and field controls |
+| `cacheferret docker clean` | Preview or confirm bounded ordinary build-cache pruning |
 | `cacheferret clean` | Preview or clean eligible caches |
 | `cacheferret catalog` | List supported cache kinds with pagination and field controls |
 | `cacheferret schema [path]` | Print or narrow the clispec.dev v0.3 contract |
@@ -223,6 +235,7 @@ CacheFerret follows [clispec.dev v0.3](https://clispec.dev):
 cacheferret schema
 cacheferret schema clean
 cacheferret schema docker
+cacheferret schema docker clean
 ```
 
 | exit | kind | meaning |
@@ -233,6 +246,8 @@ cacheferret schema docker
 | `4` | `io` | Filesystem or process operation failed |
 | `5` | `conflict` | Every target changed or became unsafe before deletion |
 | `6` | `confirmation_required` | A non-TTY clean omitted `--yes` |
+| `7` | `native_unavailable` | A native tool, daemon, or operation is unavailable; retryable |
+| `8` | `native_protocol` | Native output could not be interpreted safely |
 
 ## Development
 
