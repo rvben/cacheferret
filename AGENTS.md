@@ -57,10 +57,7 @@ be selectable or deletable.
 
 ## Current release state
 
-- Current source version: `0.5.0`.
-- Latest published version: `0.4.2`.
-- The `0.5.0` release candidate is prepared locally at `577283c`; it has not
-  been tagged, pushed, or published and requires explicit approval first.
+- Current version: `0.5.0`.
 - Published to crates.io: <https://crates.io/crates/cacheferret>
 - Published to PyPI: <https://pypi.org/project/cacheferret/>
 - PyPI provides native x86_64/aarch64 wheels for macOS and manylinux2014 Linux,

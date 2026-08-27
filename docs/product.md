@@ -219,7 +219,7 @@ brand claims or declare an unreviewed replacement final.
   the claimed behavior.
 - `docs/native-cleanup.md` records the bounded design for future native cleanup
   adapters.
-- Version 0.4.2 is published through crates.io, PyPI, GitHub Releases, and the
+- Version 0.5.0 is published through crates.io, PyPI, GitHub Releases, and the
   Homebrew tap, with native macOS and Linux artifacts described in the README.
 - No testimonials, customer logos, usage analytics, or performance claims are
   approved evidence; future work must not invent them.
@@ -266,7 +266,7 @@ automation. At minimum:
 
 ## Current Distribution
 
-Version 0.4.2 is published on crates.io, PyPI, GitHub Releases, and the Homebrew
+Version 0.5.0 is published on crates.io, PyPI, GitHub Releases, and the Homebrew
 tap. PyPI packages the native Rust executable through Maturin and provides
 macOS and manylinux2014 wheels for Intel and ARM plus an sdist. Tag-driven
 publication fails before building when a required publishing credential is
