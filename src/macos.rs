@@ -3,10 +3,12 @@ use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 use std::env;
+use walkdir::WalkDir;
 
 use crate::catalog::{GlobalPath, valid_cachedir_tag};
 
 const LARGE_TEMP_WORKSPACE_BYTES: u64 = 100 * 1024 * 1024;
+const TEMP_WORKSPACE_CACHE_DEPTH: usize = 4;
 
 #[cfg(target_os = "macos")]
 pub(crate) fn temporary_paths(home: &Path) -> Vec<GlobalPath> {
@@ -56,15 +58,64 @@ fn temporary_paths_at(
         if recognized_temporary_build_cache(&path) {
             paths.push(candidate(path, "macos-temporary-build-cache", true, 0));
         } else if looks_like_temporary_workspace(&path) {
-            paths.push(candidate(
-                path,
-                "macos-temporary-workspace",
-                false,
-                LARGE_TEMP_WORKSPACE_BYTES,
-            ));
+            let nested_caches = tagged_caches_in_temporary_workspace(&path, owner);
+            if nested_caches.is_empty() {
+                paths.push(candidate(
+                    path,
+                    "macos-temporary-workspace",
+                    false,
+                    LARGE_TEMP_WORKSPACE_BYTES,
+                ));
+            } else {
+                paths.extend(
+                    nested_caches
+                        .into_iter()
+                        .map(|cache| candidate(cache, "macos-temporary-build-cache", true, 0)),
+                );
+            }
         }
     }
     paths
+}
+
+fn tagged_caches_in_temporary_workspace(workspace: &Path, owner: u64) -> Vec<PathBuf> {
+    let mut caches = Vec::new();
+    let mut walker = WalkDir::new(workspace)
+        .min_depth(1)
+        .max_depth(TEMP_WORKSPACE_CACHE_DEPTH)
+        .follow_links(false)
+        .into_iter();
+
+    while let Some(item) = walker.next() {
+        let Ok(entry) = item else {
+            continue;
+        };
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type().is_symlink() || is_control_directory(path) {
+            walker.skip_current_dir();
+            continue;
+        }
+        if !owned_real_directory(path, owner) {
+            walker.skip_current_dir();
+            continue;
+        }
+        if valid_cachedir_tag(path) {
+            caches.push(path.to_path_buf());
+            walker.skip_current_dir();
+        }
+    }
+
+    caches
+}
+
+fn is_control_directory(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | ".hg" | ".svn")
+    )
 }
 
 fn candidate(path: PathBuf, kind: &'static str, cleanable: bool, minimum_bytes: u64) -> GlobalPath {
@@ -238,6 +289,53 @@ mod tests {
             LARGE_TEMP_WORKSPACE_BYTES
         );
         assert!(paths.iter().all(|path| path.path != unrelated));
+    }
+
+    #[test]
+    fn tagged_cache_inside_temporary_workspace_is_independently_cleanable() {
+        let fixture = tempdir().unwrap();
+        let private_tmp = fixture.path().join("private-tmp");
+        let user_temp = fixture.path().join("user-temp");
+        let workspace = private_tmp.join("release-workspace");
+        let target = workspace.join("repo/target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(workspace.join("repo/Cargo.toml"), "[package]").unwrap();
+        fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target.join("debug/deps/demo"), [0_u8; 32]).unwrap();
+
+        let paths = temporary_paths_at(&private_tmp, &user_temp, fixture.path());
+        let target = target.canonicalize().unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+
+        let cache = paths.iter().find(|path| path.path == target).unwrap();
+        assert_eq!(cache.kind, "macos-temporary-build-cache");
+        assert!(cache.cleanable);
+        assert!(paths.iter().all(|path| path.path != workspace));
+    }
+
+    #[test]
+    fn invalid_nested_tag_does_not_hide_scan_only_workspace() {
+        let fixture = tempdir().unwrap();
+        let private_tmp = fixture.path().join("private-tmp");
+        let user_temp = fixture.path().join("user-temp");
+        let workspace = private_tmp.join("review-workspace");
+        let target = workspace.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[package]").unwrap();
+        fs::write(target.join("CACHEDIR.TAG"), "not a valid signature\n").unwrap();
+
+        let paths = temporary_paths_at(&private_tmp, &user_temp, fixture.path());
+        let workspace = workspace.canonicalize().unwrap();
+        let target = target.canonicalize().unwrap();
+
+        let workspace_candidate = paths.iter().find(|path| path.path == workspace).unwrap();
+        assert_eq!(workspace_candidate.kind, "macos-temporary-workspace");
+        assert!(!workspace_candidate.cleanable);
+        assert!(paths.iter().all(|path| path.path != target));
     }
 
     #[test]

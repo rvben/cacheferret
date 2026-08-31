@@ -170,8 +170,9 @@ agents can preview the same output contract with `--dry-run`.
 In scope:
 
 - Recognized project and shared caches across supported developer ecosystems.
-- Recognized macOS temporary build caches and diagnostic visibility into large
-  temporary project workspaces.
+- Recognized macOS temporary build caches, including valid `CACHEDIR.TAG` roots
+  nested inside temporary workspaces, and diagnostic visibility into large
+  temporary project workspaces without a recognized nested cache.
 - Disk-usage discovery, filtering, sorting, inspection, focused deletion, and
   rapid batch selection.
 - Safe preview and cleanup for scripts.

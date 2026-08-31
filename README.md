@@ -199,9 +199,12 @@ libraries may link packages from it.
 Temporary-storage discovery is deliberately narrow. CacheFerret only considers
 directories owned by the current user, never follows symlinks, and does not
 treat arbitrary `/private/tmp` contents as deletable. Recognizable build/cache
-names are cleanable; large directories with project markers are reported as
-scan-only diagnostic findings. Global cleanup remains opt-in, and recent
-temporary entries remain protected unless `--include-recent` is supplied.
+names are cleanable. Valid `CACHEDIR.TAG` roots nested inside a temporary
+workspace are measured and protected by their own activity, independently of
+the parent workspace; they take precedence in that scan to avoid double-counting
+their bytes. Large workspaces without a recognized nested cache are reported as
+scan-only diagnostic findings. Global cleanup remains opt-in, and recent cache
+entries remain protected unless `--include-recent` is supplied.
 
 ## Commands
 
