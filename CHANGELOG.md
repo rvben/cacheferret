@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/rvben/cacheferret/compare/v0.5.0...v0.5.1) - 2026-08-31
+
 ### Fixed
 
 - Valid `CACHEDIR.TAG` caches nested inside macOS temporary workspaces are now

@@ -155,7 +155,7 @@ checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
 name = "cacheferret"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "clap_complete",
