@@ -6,6 +6,8 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/rvben/cacheferret/compare/v0.5.1...v0.5.2) - 2026-08-31
+
 ### Added
 
 - Playwright browser downloads, JetBrains Plugin Verifier downloads, and

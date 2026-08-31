@@ -269,7 +269,7 @@ automation. At minimum:
 
 ## Current Distribution
 
-Version 0.5.1 is published on crates.io, PyPI, GitHub Releases, and the Homebrew
+Version 0.5.2 is published on crates.io, PyPI, GitHub Releases, and the Homebrew
 tap. PyPI packages the native Rust executable through Maturin and provides
 macOS and manylinux2014 wheels for Intel and ARM plus an sdist. Tag-driven
 publication fails before building when a required publishing credential is
