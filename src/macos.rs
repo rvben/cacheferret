@@ -57,30 +57,30 @@ fn temporary_paths_at(
         }
         if recognized_temporary_build_cache(&path) {
             paths.push(candidate(path, "macos-temporary-build-cache", true, 0));
-        } else if looks_like_temporary_workspace(&path) {
-            let nested_caches = tagged_caches_in_temporary_workspace(&path, owner);
-            if nested_caches.is_empty() {
+        } else {
+            let nested_caches = tagged_caches_in_temporary_tree(&path, owner);
+            if !nested_caches.is_empty() {
+                paths.extend(
+                    nested_caches
+                        .into_iter()
+                        .map(|cache| candidate(cache, "macos-temporary-build-cache", true, 0)),
+                );
+            } else if looks_like_temporary_workspace(&path) {
                 paths.push(candidate(
                     path,
                     "macos-temporary-workspace",
                     false,
                     LARGE_TEMP_WORKSPACE_BYTES,
                 ));
-            } else {
-                paths.extend(
-                    nested_caches
-                        .into_iter()
-                        .map(|cache| candidate(cache, "macos-temporary-build-cache", true, 0)),
-                );
             }
         }
     }
     paths
 }
 
-fn tagged_caches_in_temporary_workspace(workspace: &Path, owner: u64) -> Vec<PathBuf> {
+fn tagged_caches_in_temporary_tree(root: &Path, owner: u64) -> Vec<PathBuf> {
     let mut caches = Vec::new();
-    let mut walker = WalkDir::new(workspace)
+    let mut walker = WalkDir::new(root)
         .min_depth(1)
         .max_depth(TEMP_WORKSPACE_CACHE_DEPTH)
         .follow_links(false)
@@ -155,7 +155,7 @@ fn valid_chrome_signing_clone_root(path: &Path, owner: u64) -> bool {
 }
 
 fn recognized_temporary_build_cache(path: &Path) -> bool {
-    if valid_cachedir_tag(path) {
+    if valid_cachedir_tag(path) || is_go_build_cache(path) || is_xcode_derived_data(path) {
         return true;
     }
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -178,6 +178,30 @@ fn recognized_temporary_build_cache(path: &Path) -> bool {
         || ["-target", "-venv", "-go-build", "-go-mod", "-gomod"]
             .iter()
             .any(|suffix| name.ends_with(suffix))
+}
+
+fn is_go_build_cache(path: &Path) -> bool {
+    const README_FIRST_LINE: &str =
+        "This directory holds cached build artifacts from the Go build system.";
+    let valid_readme = fs::read_to_string(path.join("README"))
+        .is_ok_and(|contents| contents.lines().next() == Some(README_FIRST_LINE));
+    valid_readme
+        && fs::read_dir(path).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+                    && entry.file_name().to_str().is_some_and(is_hex_bucket)
+            })
+        })
+}
+
+fn is_hex_bucket(name: &str) -> bool {
+    name.len() == 2 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_xcode_derived_data(path: &Path) -> bool {
+    path.join("Build/Intermediates.noindex").is_dir()
+        && path.join("Logs").is_dir()
+        && (path.join("Build/Products").is_dir() || path.join("ModuleCache.noindex").is_dir())
 }
 
 fn looks_like_temporary_workspace(path: &Path) -> bool {
@@ -315,6 +339,72 @@ mod tests {
         assert_eq!(cache.kind, "macos-temporary-build-cache");
         assert!(cache.cleanable);
         assert!(paths.iter().all(|path| path.path != workspace));
+    }
+
+    #[test]
+    fn tagged_cache_inside_unmarked_temporary_tree_is_cleanable() {
+        let fixture = tempdir().unwrap();
+        let private_tmp = fixture.path().join("private-tmp");
+        let user_temp = fixture.path().join("user-temp");
+        let target = private_tmp.join("automation-output/repo/target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+
+        let paths = temporary_paths_at(&private_tmp, &user_temp, fixture.path());
+        let target = target.canonicalize().unwrap();
+
+        let cache = paths.iter().find(|path| path.path == target).unwrap();
+        assert_eq!(cache.kind, "macos-temporary-build-cache");
+        assert!(cache.cleanable);
+    }
+
+    #[test]
+    fn structural_go_and_xcode_caches_are_cleanable() {
+        let fixture = tempdir().unwrap();
+        let private_tmp = fixture.path().join("private-tmp");
+        let user_temp = fixture.path().join("user-temp");
+        let go_cache = private_tmp.join("opaque-review-output");
+        fs::create_dir_all(go_cache.join("0a")).unwrap();
+        fs::write(
+            go_cache.join("README"),
+            "This directory holds cached build artifacts from the Go build system.\n",
+        )
+        .unwrap();
+        let derived_data = private_tmp.join("opaque-ios-output");
+        fs::create_dir_all(derived_data.join("Build/Intermediates.noindex")).unwrap();
+        fs::create_dir_all(derived_data.join("Build/Products")).unwrap();
+        fs::create_dir_all(derived_data.join("Logs")).unwrap();
+
+        let paths = temporary_paths_at(&private_tmp, &user_temp, fixture.path());
+        let go_cache = go_cache.canonicalize().unwrap();
+        let derived_data = derived_data.canonicalize().unwrap();
+
+        for cache in [go_cache, derived_data] {
+            let candidate = paths.iter().find(|path| path.path == cache).unwrap();
+            assert_eq!(candidate.kind, "macos-temporary-build-cache");
+            assert!(candidate.cleanable);
+        }
+    }
+
+    #[test]
+    fn partial_structural_signatures_are_rejected() {
+        let fixture = tempdir().unwrap();
+        let fake_go = fixture.path().join("fake-go");
+        fs::create_dir_all(fake_go.join("not-a-bucket")).unwrap();
+        fs::write(
+            fake_go.join("README"),
+            "This directory holds cached build artifacts from the Go build system.\n",
+        )
+        .unwrap();
+        let fake_xcode = fixture.path().join("fake-xcode");
+        fs::create_dir_all(fake_xcode.join("Build/Intermediates.noindex")).unwrap();
+
+        assert!(!recognized_temporary_build_cache(&fake_go));
+        assert!(!recognized_temporary_build_cache(&fake_xcode));
     }
 
     #[test]

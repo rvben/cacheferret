@@ -169,10 +169,12 @@ agents can preview the same output contract with `--dry-run`.
 
 In scope:
 
-- Recognized project and shared caches across supported developer ecosystems.
-- Recognized macOS temporary build caches, including valid `CACHEDIR.TAG` roots
-  nested inside temporary workspaces, and diagnostic visibility into large
-  temporary project workspaces without a recognized nested cache.
+- Recognized project and shared caches across supported developer ecosystems,
+  including rebuildable browser, plugin-verification, and hook environments.
+- Recognized macOS temporary build caches, including structurally verified Go
+  and Xcode caches and valid `CACHEDIR.TAG` roots nested inside owned temporary
+  trees, plus diagnostic visibility into large temporary project workspaces
+  without a recognized nested cache.
 - Disk-usage discovery, filtering, sorting, inspection, focused deletion, and
   rapid batch selection.
 - Safe preview and cleanup for scripts.

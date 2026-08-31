@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+
+use walkdir::WalkDir;
 
 use crate::model::{FilesystemSpaceDelta, SkippedPath};
 use crate::scanner::revalidate_for_delete;
@@ -106,7 +109,7 @@ where
             });
             continue;
         }
-        match fs::remove_dir_all(&candidate.path) {
+        match remove_cache_directory(candidate) {
             Ok(()) => {
                 reclaimed = reclaimed.saturating_add(candidate.bytes);
                 allocated_removed = allocated_removed.saturating_add(candidate.allocated_bytes);
@@ -164,6 +167,80 @@ where
         cleaned_paths,
         skipped_paths,
     }
+}
+
+fn remove_cache_directory(candidate: &CacheCandidate) -> io::Result<()> {
+    match fs::remove_dir_all(&candidate.path) {
+        Ok(()) => Ok(()),
+        Err(original) if is_go_module_tree(candidate) => {
+            make_owned_directories_writable(&candidate.path).map_err(|repair| {
+                io::Error::new(
+                    repair.kind(),
+                    format!("{original}; could not prepare read-only Go module cache: {repair}"),
+                )
+            })?;
+            fs::remove_dir_all(&candidate.path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_go_module_tree(candidate: &CacheCandidate) -> bool {
+    if candidate.kind == "go-module-cache" {
+        return true;
+    }
+    if candidate.kind != "macos-temporary-build-cache" {
+        return false;
+    }
+    let name = candidate
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name.contains("go-mod") || name.contains("gomod")
+}
+
+#[cfg(unix)]
+fn make_owned_directories_writable(root: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let root_metadata = fs::symlink_metadata(root)?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cache root is not a real directory",
+        ));
+    }
+    let owner = root_metadata.uid();
+    let mut directories = Vec::new();
+    for item in WalkDir::new(root).follow_links(false) {
+        let entry = item.map_err(io::Error::other)?;
+        if !entry.file_type().is_dir() || entry.file_type().is_symlink() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.uid() != owner {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Go module cache contains a directory owned by another user",
+            ));
+        }
+        directories.push((entry.path().to_path_buf(), metadata.permissions()));
+    }
+    for (directory, mut permissions) in directories {
+        permissions.set_mode(permissions.mode() | 0o200);
+        fs::set_permissions(directory, permissions)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_owned_directories_writable(_root: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "read-only Go module cache cleanup is unsupported on this platform",
+    ))
 }
 
 fn signed_delta(after: u64, before: u64) -> i64 {
@@ -243,6 +320,36 @@ mod tests {
 
         assert!(report.changed);
         assert_eq!(report.cleaned, 1);
+        assert!(!project.join("target").exists());
+        assert!(project.join("Cargo.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_read_only_go_module_directories_after_owner_check() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("demo");
+        let module = project.join("target/example.org/module@v1.0.0");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        fs::write(module.join("module.go"), "package module\n").unwrap();
+        let mut permissions = fs::metadata(&module).unwrap().permissions();
+        permissions.set_mode(0o555);
+        fs::set_permissions(&module, permissions).unwrap();
+        let mut scan = discover(&DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 0,
+        })
+        .unwrap();
+        let mut candidate = scan.candidates.remove(0);
+        candidate.kind = "go-module-cache".to_owned();
+
+        remove_cache_directory(&candidate).unwrap();
+
         assert!(!project.join("target").exists());
         assert!(project.join("Cargo.toml").exists());
     }

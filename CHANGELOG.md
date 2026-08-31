@@ -6,6 +6,22 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Playwright browser downloads, JetBrains Plugin Verifier downloads, and
+  pre-commit/prek hook environments are now recognized as rebuildable global
+  caches.
+
+### Fixed
+
+- macOS temporary-storage discovery now recognizes Go build caches and Xcode
+  DerivedData by their filesystem structure, even when automation gives them
+  unconventional names.
+- Valid `CACHEDIR.TAG` roots are now discovered inside any owned temporary tree,
+  not only trees that also look like project workspaces.
+- Read-only Go module cache directories are made owner-writable only after an
+  ownership check, allowing verified module caches to be removed completely.
+
 ## [0.5.1](https://github.com/rvben/cacheferret/compare/v0.5.0...v0.5.1) - 2026-08-31
 
 ### Fixed

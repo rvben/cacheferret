@@ -118,6 +118,13 @@ pub fn catalog() -> Vec<CatalogEntry> {
         ),
         entry!("uv-cache", "python", Global, "uv package cache", true),
         entry!(
+            "pre-commit-cache",
+            "python",
+            Global,
+            "pre-commit and prek hook environments",
+            true
+        ),
+        entry!(
             "node-modules",
             "javascript",
             Project,
@@ -144,6 +151,13 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "javascript",
             Global,
             "Deno dependency cache",
+            true
+        ),
+        entry!(
+            "playwright-cache",
+            "javascript",
+            Global,
+            "Playwright downloaded browsers",
             true
         ),
         entry!(
@@ -180,6 +194,13 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "jvm",
             Global,
             "Shared Gradle caches",
+            true
+        ),
+        entry!(
+            "jetbrains-plugin-verifier-cache",
+            "jvm",
+            Global,
+            "JetBrains Plugin Verifier downloaded plugins",
             true
         ),
         blocked_entry!(
@@ -580,6 +601,12 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
             global(home.join(".hex/packages"), "hex-cache", "elixir", true),
             global(home.join("go/pkg/mod"), "go-module-cache", "go", true),
             global(home.join(".swiftpm/cache"), "swiftpm-cache", "swift", true),
+            global(
+                home.join(".pluginVerifier/loaded-plugins"),
+                "jetbrains-plugin-verifier-cache",
+                "jvm",
+                true,
+            ),
         ]);
 
         if cfg!(target_os = "macos") {
@@ -588,6 +615,12 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
                 global(mac_caches.join("pip"), "pip-cache", "python", true),
                 global(mac_caches.join("uv"), "uv-cache", "python", true),
                 global(mac_caches.join("deno"), "deno-cache", "javascript", true),
+                global(
+                    mac_caches.join("ms-playwright"),
+                    "playwright-cache",
+                    "javascript",
+                    true,
+                ),
                 global(mac_caches.join("go-build"), "go-build-cache", "go", false),
                 global(mac_caches.join("composer"), "composer-cache", "php", true),
                 global(mac_caches.join("ccache"), "ccache", "cpp", false),
@@ -622,6 +655,8 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
         paths.extend([
             global(cache.join("pip"), "pip-cache", "python", true),
             global(cache.join("uv"), "uv-cache", "python", true),
+            global(cache.join("pre-commit"), "pre-commit-cache", "python", true),
+            global(cache.join("prek"), "pre-commit-cache", "python", true),
             global(cache.join("deno"), "deno-cache", "javascript", true),
             global(cache.join("go-build"), "go-build-cache", "go", false),
             global(cache.join("ccache"), "ccache", "cpp", false),
@@ -766,6 +801,23 @@ mod tests {
         ] {
             let entry = entries.iter().find(|entry| entry.kind == kind).unwrap();
             assert!(!entry.cleanable, "{kind} must remain scan-only");
+        }
+    }
+
+    #[test]
+    fn rebuildable_tool_downloads_are_cleanable() {
+        let entries = catalog();
+        for kind in [
+            "jetbrains-plugin-verifier-cache",
+            "playwright-cache",
+            "pre-commit-cache",
+        ] {
+            let entry = entries.iter().find(|entry| entry.kind == kind).unwrap();
+            assert!(entry.cleanable, "{kind} should be cleanable");
+            assert!(
+                entry.network_restore,
+                "{kind} requires a download to restore"
+            );
         }
     }
 }

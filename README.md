@@ -169,10 +169,10 @@ release covers:
 | ecosystem | project caches | shared caches |
 | --- | --- | --- |
 | Rust | Cargo `target/` | Cargo registry and git checkouts |
-| Python | virtualenvs, bytecode, pytest, mypy, Ruff, tox, nox | pip and uv |
-| JavaScript | `node_modules` | npm, pnpm, Bun, Deno |
+| Python | virtualenvs, bytecode, pytest, mypy, Ruff, tox, nox | pip, uv, and pre-commit/prek |
+| JavaScript | `node_modules` | npm, pnpm, Bun, Deno, and Playwright |
 | Go | — | compiler and module caches |
-| JVM/Android | Gradle output and project cache, Maven `target/` | Gradle; Maven repository (scan-only) |
+| JVM/Android | Gradle output and project cache, Maven `target/` | Gradle and Plugin Verifier; Maven repository (scan-only) |
 | .NET | `bin/`, `obj/` | NuGet packages |
 | Ruby/PHP | Bundler and Composer dependencies | RubyGems and Composer caches |
 | Swift | SwiftPM `.build/` | SwiftPM caches and Xcode DerivedData |
@@ -199,12 +199,13 @@ libraries may link packages from it.
 Temporary-storage discovery is deliberately narrow. CacheFerret only considers
 directories owned by the current user, never follows symlinks, and does not
 treat arbitrary `/private/tmp` contents as deletable. Recognizable build/cache
-names are cleanable. Valid `CACHEDIR.TAG` roots nested inside a temporary
-workspace are measured and protected by their own activity, independently of
-the parent workspace; they take precedence in that scan to avoid double-counting
-their bytes. Large workspaces without a recognized nested cache are reported as
-scan-only diagnostic findings. Global cleanup remains opt-in, and recent cache
-entries remain protected unless `--include-recent` is supplied.
+names, exact Go build-cache metadata, and Xcode DerivedData structures are
+cleanable. Valid `CACHEDIR.TAG` roots nested inside any owned temporary tree are
+measured and protected by their own activity, independently of the parent; they
+take precedence in that scan to avoid double-counting their bytes. Large
+workspaces without a recognized nested cache are reported as scan-only
+diagnostic findings. Global cleanup remains opt-in, and recent cache entries
+remain protected unless `--include-recent` is supplied.
 
 ## Commands
 
