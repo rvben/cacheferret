@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo=${CACHEFERRET_RELEASE_REPO:-rvben/cacheferret}
-required=(CARGO_REGISTRY_TOKEN HOMEBREW_TAP_DEPLOY_KEY PYPI_API_TOKEN)
+required=(HOMEBREW_TAP_DEPLOY_KEY PYPI_API_TOKEN)
 
 if ! command -v gh >/dev/null; then
   echo "gh is required to verify release readiness" >&2

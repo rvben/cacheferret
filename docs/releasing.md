@@ -6,15 +6,18 @@ GitHub archives, checksums, and the Homebrew tap from a single
 
 ## Prerequisites
 
-- `CARGO_REGISTRY_TOKEN` is configured for the GitHub repository.
+- The `cacheferret` crate trusts `rvben/cacheferret`'s `release.yml` workflow on
+  crates.io.
 - `PYPI_API_TOKEN` is configured for the GitHub repository.
 - `HOMEBREW_TAP_DEPLOY_KEY` can push to `rvben/homebrew-tap`.
 - The GitHub repository allows Actions to create releases.
 - `main` is clean and CI is green.
 
-Tag-driven workflows fail closed before building if a publishing credential is
-missing. Vership runs the same secret-name check through its `pre-bump` hook, so
-an incomplete release is refused before the version commit or tag is created.
+Tag-driven workflows fail closed before building if a required long-lived
+publishing credential is missing. Vership runs the same secret-name check
+through its `pre-bump` hook, so an incomplete PyPI or Homebrew release is
+refused before the version commit or tag is created. The crates.io publish job
+fails closed if its short-lived Trusted Publishing exchange fails.
 
 Bootstrap the repository secrets with `clihatch secrets rvben/cacheferret
 --dry-run`, inspect the proposed changes, then run the command without

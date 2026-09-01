@@ -67,7 +67,8 @@ be selectable or deletable.
 - Source, tags, release archives, and checksums are public at
   <https://github.com/rvben/cacheferret/releases/latest>.
 - Tag-driven release workflows fail closed when a required publishing secret is
-  missing; Vership checks the configured secret names before creating a tag.
+  missing; Vership checks the remaining configured secret names before creating
+  a tag. crates.io uses short-lived GitHub Trusted Publishing credentials.
 - Never copy local Cargo or PyPI credentials into GitHub secrets without the
   user's explicit authorization. Registry publishing can be performed locally;
   releases must stop rather than silently skipping that publishing target.
