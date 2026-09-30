@@ -145,6 +145,34 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "pnpm package store",
             true
         ),
+        entry!(
+            "pnpm-cache",
+            "javascript",
+            Global,
+            "pnpm metadata and dlx cache",
+            true
+        ),
+        entry!(
+            "yarn-cache",
+            "javascript",
+            Global,
+            "Yarn package cache",
+            true
+        ),
+        entry!(
+            "corepack-cache",
+            "javascript",
+            Global,
+            "Corepack package manager downloads",
+            true
+        ),
+        entry!(
+            "node-gyp-cache",
+            "javascript",
+            Global,
+            "node-gyp Node.js headers",
+            true
+        ),
         entry!("bun-cache", "javascript", Global, "Bun package cache", true),
         entry!(
             "deno-cache",
@@ -570,6 +598,12 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
             global(home.join(".cargo/git/checkouts"), "cargo-git", "rust", true),
             global(home.join(".npm/_cacache"), "npm-cache", "javascript", true),
             global(
+                home.join(".yarn/berry/cache"),
+                "yarn-cache",
+                "javascript",
+                true,
+            ),
+            global(
                 home.join(".bun/install/cache"),
                 "bun-cache",
                 "javascript",
@@ -615,6 +649,14 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
                 global(mac_caches.join("pip"), "pip-cache", "python", true),
                 global(mac_caches.join("uv"), "uv-cache", "python", true),
                 global(mac_caches.join("deno"), "deno-cache", "javascript", true),
+                global(mac_caches.join("pnpm"), "pnpm-cache", "javascript", true),
+                global(mac_caches.join("Yarn"), "yarn-cache", "javascript", true),
+                global(
+                    mac_caches.join("node-gyp"),
+                    "node-gyp-cache",
+                    "javascript",
+                    true,
+                ),
                 global(
                     mac_caches.join("ms-playwright"),
                     "playwright-cache",
@@ -658,6 +700,16 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
             global(cache.join("pre-commit"), "pre-commit-cache", "python", true),
             global(cache.join("prek"), "pre-commit-cache", "python", true),
             global(cache.join("deno"), "deno-cache", "javascript", true),
+            global(cache.join("pnpm"), "pnpm-cache", "javascript", true),
+            global(cache.join("yarn"), "yarn-cache", "javascript", true),
+            // Corepack uses the XDG-style path on macOS too.
+            global(
+                cache.join("node/corepack"),
+                "corepack-cache",
+                "javascript",
+                true,
+            ),
+            global(cache.join("node-gyp"), "node-gyp-cache", "javascript", true),
             global(cache.join("go-build"), "go-build-cache", "go", false),
             global(cache.join("ccache"), "ccache", "cpp", false),
             global(cache.join("zig"), "zig-global-cache", "zig", true),
@@ -811,6 +863,10 @@ mod tests {
             "jetbrains-plugin-verifier-cache",
             "playwright-cache",
             "pre-commit-cache",
+            "pnpm-cache",
+            "yarn-cache",
+            "corepack-cache",
+            "node-gyp-cache",
         ] {
             let entry = entries.iter().find(|entry| entry.kind == kind).unwrap();
             assert!(entry.cleanable, "{kind} should be cleanable");

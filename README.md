@@ -170,7 +170,7 @@ release covers:
 | --- | --- | --- |
 | Rust | Cargo `target/` | Cargo registry and git checkouts |
 | Python | virtualenvs, bytecode, pytest, mypy, Ruff, tox, nox | pip, uv, and pre-commit/prek |
-| JavaScript | `node_modules` | npm, pnpm, Bun, Deno, and Playwright |
+| JavaScript | `node_modules` | npm, pnpm store and metadata, Yarn, Corepack, node-gyp, Bun, Deno, and Playwright |
 | Go | — | compiler and module caches |
 | JVM/Android | Gradle output and project cache, Maven `target/` | Gradle and Plugin Verifier; Maven repository (scan-only) |
 | .NET | `bin/`, `obj/` | NuGet packages |
