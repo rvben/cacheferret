@@ -988,6 +988,7 @@ mod tests {
         for cache in ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"] {
             fs::create_dir_all(python.join(cache)).unwrap();
         }
+        fs::create_dir_all(temp.path().join("markdown/.rumdl_cache")).unwrap();
 
         let ruby = temp.path().join("ruby");
         fs::create_dir_all(ruby.join("vendor/bundle")).unwrap();
@@ -1047,6 +1048,7 @@ mod tests {
             "pytest-cache",
             "mypy-cache",
             "ruff-cache",
+            "rumdl-cache",
             "bundler-vendor",
             "cmake-build",
             "cabal-dist",

@@ -6,6 +6,12 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- rumdl lint caches (`.rumdl_cache`) and the mise metadata cache are now
+  recognized; rumdl caches were previously matched only through their
+  `CACHEDIR.TAG`.
+
 ## [0.5.2](https://github.com/rvben/cacheferret/compare/v0.5.1...v0.5.2) - 2026-08-31
 
 ### Added

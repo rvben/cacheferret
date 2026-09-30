@@ -392,6 +392,14 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "Directory carrying a valid CACHEDIR.TAG",
             false
         ),
+        entry!("rumdl-cache", "other", Project, "rumdl lint cache", false),
+        entry!(
+            "mise-cache",
+            "other",
+            Global,
+            "mise version lists and tool metadata",
+            true
+        ),
     ]
 }
 
@@ -434,6 +442,7 @@ pub(crate) fn identify_project_cache(path: &Path) -> Option<ProjectKind> {
         ".pytest_cache" => Some(project("pytest-cache", "python", false)),
         ".mypy_cache" => Some(project("mypy-cache", "python", false)),
         ".ruff_cache" => Some(project("ruff-cache", "python", false)),
+        ".rumdl_cache" => Some(project("rumdl-cache", "other", false)),
         ".tox" if has_any_file(parent, &["tox.ini", "pyproject.toml"]) => {
             Some(project("tox-env", "python", true))
         }
@@ -614,6 +623,7 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
             paths.extend([
                 global(mac_caches.join("pip"), "pip-cache", "python", true),
                 global(mac_caches.join("uv"), "uv-cache", "python", true),
+                global(mac_caches.join("mise"), "mise-cache", "other", true),
                 global(mac_caches.join("deno"), "deno-cache", "javascript", true),
                 global(
                     mac_caches.join("ms-playwright"),
@@ -655,6 +665,7 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
         paths.extend([
             global(cache.join("pip"), "pip-cache", "python", true),
             global(cache.join("uv"), "uv-cache", "python", true),
+            global(cache.join("mise"), "mise-cache", "other", true),
             global(cache.join("pre-commit"), "pre-commit-cache", "python", true),
             global(cache.join("prek"), "pre-commit-cache", "python", true),
             global(cache.join("deno"), "deno-cache", "javascript", true),
@@ -678,6 +689,7 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
         ("DENO_DIR", "deno-cache", "javascript", true),
         ("GOCACHE", "go-build-cache", "go", false),
         ("GOMODCACHE", "go-module-cache", "go", true),
+        ("MISE_CACHE_DIR", "mise-cache", "other", true),
         (
             "TF_PLUGIN_CACHE_DIR",
             "terraform-plugin-cache",
@@ -714,6 +726,7 @@ fn safe_dynamic_global_path(variable: &str, path: &Path, home: Option<&Path>) ->
         "DENO_DIR" => leaf.contains("deno"),
         "GOCACHE" => leaf.contains("go-build") || leaf.contains("gocache"),
         "GOMODCACHE" => leaf == "mod" || leaf.contains("gomod"),
+        "MISE_CACHE_DIR" => leaf.contains("mise"),
         "TF_PLUGIN_CACHE_DIR" => leaf.contains("terraform") || leaf.contains("plugin"),
         _ => false,
     }
@@ -788,6 +801,16 @@ mod tests {
             "GOCACHE",
             Path::new("/var/cache/go-build"),
             None
+        ));
+        assert!(safe_dynamic_global_path(
+            "MISE_CACHE_DIR",
+            Path::new("/var/cache/mise"),
+            Some(home)
+        ));
+        assert!(!safe_dynamic_global_path(
+            "MISE_CACHE_DIR",
+            Path::new("/home/developer/.config"),
+            Some(home)
         ));
     }
 

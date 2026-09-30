@@ -181,7 +181,7 @@ release covers:
 | Haskell | Stack and Cabal project output | Stack and Cabal stores |
 | Terraform/R | modules, providers, renv project libraries | configured provider; renv cache (scan-only) |
 | macOS | — | Chrome signing clones, temporary build caches, and large temporary workspaces (scan-only) |
-| Other | any directory with a valid `CACHEDIR.TAG` | — |
+| Other | rumdl, and any directory with a valid `CACHEDIR.TAG` | mise |
 
 Docker build data is intentionally not treated as a directory cache.
 `cacheferret docker` uses `docker system df` to report images, containers,
