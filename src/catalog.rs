@@ -72,6 +72,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "Cargo git dependency checkouts",
             true
         ),
+        entry!("sccache", "rust", Global, "sccache compiler cache", false),
         entry!(
             "python-venv",
             "python",
@@ -117,6 +118,20 @@ pub fn catalog() -> Vec<CatalogEntry> {
             true
         ),
         entry!("uv-cache", "python", Global, "uv package cache", true),
+        entry!(
+            "poetry-cache",
+            "python",
+            Global,
+            "Poetry package and artifact cache",
+            true
+        ),
+        blocked_entry!(
+            "huggingface-hub",
+            "python",
+            Global,
+            "Hugging Face model and dataset cache (scan only; gated or withdrawn models may not re-download)",
+            true
+        ),
         entry!(
             "pre-commit-cache",
             "python",
@@ -613,6 +628,19 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
             let mac_caches = home.join("Library/Caches");
             paths.extend([
                 global(mac_caches.join("pip"), "pip-cache", "python", true),
+                global(
+                    mac_caches.join("pypoetry/cache"),
+                    "poetry-cache",
+                    "python",
+                    true,
+                ),
+                global(
+                    mac_caches.join("pypoetry/artifacts"),
+                    "poetry-cache",
+                    "python",
+                    true,
+                ),
+                global(mac_caches.join("Mozilla.sccache"), "sccache", "rust", false),
                 global(mac_caches.join("uv"), "uv-cache", "python", true),
                 global(mac_caches.join("deno"), "deno-cache", "javascript", true),
                 global(
@@ -654,6 +682,22 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
     if let Some(cache) = &cache {
         paths.extend([
             global(cache.join("pip"), "pip-cache", "python", true),
+            // Poetry's virtualenvs share this parent; only the download caches are listed.
+            global(cache.join("pypoetry/cache"), "poetry-cache", "python", true),
+            global(
+                cache.join("pypoetry/artifacts"),
+                "poetry-cache",
+                "python",
+                true,
+            ),
+            global(cache.join("sccache"), "sccache", "rust", false),
+            // huggingface_hub uses the XDG-style path on macOS too.
+            global_blocked(
+                cache.join("huggingface/hub"),
+                "huggingface-hub",
+                "python",
+                true,
+            ),
             global(cache.join("uv"), "uv-cache", "python", true),
             global(cache.join("pre-commit"), "pre-commit-cache", "python", true),
             global(cache.join("prek"), "pre-commit-cache", "python", true),
@@ -798,6 +842,7 @@ mod tests {
             "maven-repository",
             "renv-cache",
             "macos-temporary-workspace",
+            "huggingface-hub",
         ] {
             let entry = entries.iter().find(|entry| entry.kind == kind).unwrap();
             assert!(!entry.cleanable, "{kind} must remain scan-only");
@@ -811,6 +856,7 @@ mod tests {
             "jetbrains-plugin-verifier-cache",
             "playwright-cache",
             "pre-commit-cache",
+            "poetry-cache",
         ] {
             let entry = entries.iter().find(|entry| entry.kind == kind).unwrap();
             assert!(entry.cleanable, "{kind} should be cleanable");

@@ -168,8 +168,8 @@ release covers:
 
 | ecosystem | project caches | shared caches |
 | --- | --- | --- |
-| Rust | Cargo `target/` | Cargo registry and git checkouts |
-| Python | virtualenvs, bytecode, pytest, mypy, Ruff, tox, nox | pip, uv, and pre-commit/prek |
+| Rust | Cargo `target/` | Cargo registry and git checkouts, sccache |
+| Python | virtualenvs, bytecode, pytest, mypy, Ruff, tox, nox | pip, uv, Poetry, and pre-commit/prek; Hugging Face hub (scan-only) |
 | JavaScript | `node_modules` | npm, pnpm, Bun, Deno, and Playwright |
 | Go | — | compiler and module caches |
 | JVM/Android | Gradle output and project cache, Maven `target/` | Gradle and Plugin Verifier; Maven repository (scan-only) |
