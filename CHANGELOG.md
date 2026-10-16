@@ -6,6 +6,12 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/rvben/cacheferret/compare/v0.5.3...v0.5.4) - 2026-10-16
+
+### Added
+
+- **tui**: inspect Docker in the background and delete without remeasuring ([582b1ce](https://github.com/rvben/cacheferret/commit/582b1cedead54de55f60404508ede30509e09081))
+
 ## [0.5.3](https://github.com/rvben/cacheferret/compare/v0.5.2...v0.5.3) - 2026-10-16
 
 ### Added
