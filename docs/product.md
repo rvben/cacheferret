@@ -78,8 +78,8 @@ build a batch while advancing, and `a` operates on the current filtered and
 scoped view.
 
 Background work remains visible and never freezes input. Recognized caches
-appear immediately as sizing rows, completed measurements become browsable as
-they arrive, and rescans preserve the previous workspace until the fresh
+appear immediately as sizing rows, completed measurements become browsable and
+deletable as they arrive, and rescans preserve the previous workspace until the fresh
 snapshot is ready. Before the user interacts, focus follows the leading
 measured result. Navigation, filtering, or selection transfers focus ownership
 to the user, after which scan updates preserve the focused path while rows
@@ -102,7 +102,11 @@ not a decorative wrapper around the CLI.
 
 When global storage is in scope and cache-kind filters are not active, Docker
 inspection runs independently of the filesystem scan. Images, containers,
-volumes, and build cache appear after filesystem cache rows, ordered by
+volumes, and build cache can take up to 60 seconds to inspect. A persistent
+"Checking Docker storage…" status keeps that work visible without blocking
+filesystem cleanup. A timeout is labeled explicitly and can be retried with
+`r`; rescanning while inspection is pending reuses the active inspection.
+Images, containers, volumes, and build cache appear after filesystem cache rows, ordered by
 Docker-reported reclaimable bytes. They use daemon scope, never fake paths,
 and always keep their action visible in compact layouts. Ordinary build cache
 is the only selectable Docker resource; images, containers, volumes, and
@@ -138,8 +142,8 @@ into filesystem apparent, allocated, or observed-free-space totals.
 
 Deletion stays direct. With a selection, `d` reviews and deletes the batch;
 without one, it acts on the focused cache. Low-risk cleanup should be one
-keypress. CacheFerret asks for one compact `y`/`n` confirmation only when a
-freshly reviewed operation includes one or more risk signals:
+keypress. CacheFerret asks for one compact `y`/`n` confirmation only when an
+operation includes one or more risk signals in its current scan measurement:
 
 - modified within the last seven days;
 - apparent size of at least 1 GiB;
@@ -153,10 +157,16 @@ selection, and CLI cleanup. A user may select one individually with `Space`;
 that deliberate action permits deletion only after the prompt clearly names
 the manual override.
 
-Pressing `d` remeasures the whole operation before deciding whether to prompt.
-Immediately before removal, CacheFerret revalidates each path, filesystem
-identity, containment, kind, ownership markers, and symlink policy. Temporary
-trees that require quiescence must also match their fresh safety fingerprint.
+Pressing `d` uses the measurements already displayed to decide whether to
+prompt, without another tree walk before the prompt or after confirmation.
+Measured rows can be selected and deleted while discovery and sizing continue;
+`a` selects only currently measured, deletable rows in the visible view.
+Sizing rows and unrefreshed warm-start hints remain unavailable for deletion.
+Late scan results must not restore deleted rows or dismiss an active operation.
+Sizes and ages reflect the scan measurement, so reported removed sizes are
+estimates. Immediately before removal, CacheFerret revalidates each path,
+filesystem identity, containment, kind, ownership markers, and symlink policy. Temporary
+trees that require quiescence must also match their scan-time safety fingerprint.
 A changed or unsafe target produces a conflict instead of being removed.
 
 Docker build-cache cleanup is deliberately stricter than ordinary low-risk
@@ -237,7 +247,7 @@ brand claims or declare an unreviewed replacement final.
 1. **Directness is part of safety.** Keep focused deletion immediate while
    preserving rapid keyboard batch selection.
 2. **Guardrails are proportional and contextual.** Apply friction only when a
-   freshly measured operation carries a concrete risk signal.
+   measured operation carries a concrete risk signal.
 3. **Fresh filesystem truth outranks remembered state.** Progressive results
    and warm-start hints improve responsiveness, but mutation always depends on
    current recognition, measurement, and last-moment validation.

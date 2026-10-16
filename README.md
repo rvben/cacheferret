@@ -77,6 +77,9 @@ selection, and CLI cleanup. Select one individually with `Space` to request a
 manual override; `d` then requires confirmation and repeats the safety checks.
 Docker build cache participates in the same selection model and always asks for
 confirmation. Docker images, containers, and volumes remain inspection-only.
+Docker inspection runs in the background with a 60-second limit. The TUI shows
+“Checking Docker storage…” while you continue browsing and deleting filesystem
+caches; if the inspection times out, press `r` to retry.
 
 After a successful TUI scan, CacheFerret keeps a small private snapshot of known
 cache paths. Later launches show those paths immediately with approximate prior
@@ -105,9 +108,11 @@ cacheferret docker --fields kind,reclaimable_bytes |
   when piped. `cacheferret scan` never mutates the filesystem.
 - The TUI supports both focused and batch deletion: press `Space` to build a
   selection, then `d`; when nothing is selected, `d` acts on the focused cache.
-- Pressing `d` remeasures every target before deciding whether confirmation is
-  required. A risky batch gets one confirmation, and every target receives
-  another identity and ownership check immediately before removal.
+- Measured caches can be selected and deleted while the rest of the scan runs.
+  Pressing `d` uses the displayed size and age without repeating the tree walk.
+  A risky batch gets one confirmation, and every target receives an identity
+  and ownership check immediately before removal. Temporary trees requiring
+  quiescence still receive a fingerprint check. Sizes remain scan-time estimates.
 - `clean` defaults to project caches; shared global caches require an explicit
   `--scope global` or `--scope all`.
 - The batch `clean` command protects caches modified in the last seven days

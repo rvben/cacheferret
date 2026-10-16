@@ -263,6 +263,26 @@ printf '%s\n' \
 }
 
 #[test]
+#[cfg(unix)]
+fn docker_inspection_accepts_a_response_slower_than_five_seconds() {
+    let (temp, _state, _log) = docker_clean_fixture();
+    let docker = temp.path().join("docker");
+    let script = fs::read_to_string(&docker).unwrap();
+    fs::write(
+        &docker,
+        script.replacen("#!/bin/sh\n", "#!/bin/sh\n/bin/sleep 6\n", 1),
+    )
+    .unwrap();
+
+    let out = run_with_path(&["docker"], temp.path());
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["available"], true, "{}", out.stdout);
+    assert_eq!(value["items"][0]["kind"], "docker-build-cache");
+    assert_eq!(value["items"][0]["reclaimable_bytes"], 750_000_000_u64);
+}
+
+#[test]
 fn missing_docker_is_a_structured_nonfatal_diagnostic() {
     let temp = tempfile::tempdir().unwrap();
     let out = run_with_path(&["docker"], temp.path());

@@ -610,10 +610,10 @@ pub(crate) fn measure_tree(root: &Path) -> TreeMeasurement {
 
 /// Revalidate and remeasure a candidate against the current filesystem state.
 ///
-/// Interactive callers use this immediately before deciding whether a delete
-/// needs confirmation. The candidate keeps its original identity and safety
-/// anchor so the final cleanup revalidation still detects replacement or
-/// containment changes.
+/// Callers can explicitly request updated size and age estimates. The TUI
+/// reuses its scan measurements for deletion. The candidate keeps its original
+/// identity and safety anchor so the final cleanup revalidation still detects
+/// replacement or containment changes.
 pub fn refresh_candidate(
     candidate: &CacheCandidate,
     protect_days: u64,

@@ -23,7 +23,7 @@ The interaction model should feel familiar to ncdu/gdu users: `Space` toggles a
 cache and advances, `a` toggles all deletable caches in the visible view, and
 `d` deletes the selection (or the focused item when there is no selection). Do
 not add blanket confirmation or ceremony to every delete. Ask for one compact
-`y`/`n` confirmation for the operation only when a freshly measured target is
+`y`/`n` confirmation for the operation only when a measured target is
 risky: recent, at least 1 GiB, shared/global, unknown-age, or dependent on a
 package download for restoration. Catalog entries marked scan-only must never
 be selectable or deletable.
@@ -35,8 +35,9 @@ be selectable or deletable.
 2. Guardrails should be proportional and contextual. Low-risk cache deletion
    should be one keypress; risky deletion should require one explicit answer.
 3. Safety checks belong close to mutation, not as repeated user friction.
-   Pressing `d` remeasures the whole operation in the background, and deletion
-   revalidates each path,
+   Measured rows can be deleted while scanning continues. Pressing `d` reuses
+   displayed measurements; do not repeat whole-tree sizing before deletion.
+   Deletion revalidates each path,
    filesystem identity, containment, kind, ownership markers, and symlink
    policy immediately before removal.
 4. The TUI is the product experience, not a decorative wrapper around the CLI.

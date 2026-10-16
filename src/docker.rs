@@ -10,7 +10,9 @@ use crate::colima;
 use crate::{NativeCleanReport, NativeDiagnostic, NativeReport, NativeResource};
 
 const PROVIDER: &str = "docker";
-const INSPECTION_TIMEOUT: Duration = Duration::from_secs(5);
+// Large inventories and VM-backed daemons can take well over five seconds.
+// The TUI runs this independently of filesystem discovery and interaction.
+const INSPECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;

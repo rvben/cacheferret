@@ -1,13 +1,16 @@
 # Native cleanup integrations
 
-CacheFerret deletes recognized directory candidates itself. It
-remeasures the selected tree, checks its identity and ownership markers, and
-then removes exactly that path. Docker ordinary build cache is the first
+CacheFerret deletes recognized directory candidates itself. It uses the scan's
+tree measurement, checks the selected path's identity and ownership markers,
+and then removes exactly that path. Docker ordinary build cache is the first
 daemon-owned exception and uses Docker's own bounded prune operation.
 
 Docker is the first native adapter. `cacheferret docker` invokes a
 bounded `docker system df --format json` inspection and exposes the result in
-text, JSON, the offline schema, and the TUI. `cacheferret docker clean` refreshes
+text, JSON, the offline schema, and the TUI. Inspection allows up to 60 seconds
+for large or VM-backed inventories; the TUI keeps filesystem actions available
+and shows a persistent pending status. Timeouts are reported explicitly and
+can be retried with `r`. `cacheferret docker clean` refreshes
 the ordinary build-cache estimate, always requires confirmation unless `--yes`
 is explicit, revalidates again, and invokes only `docker builder prune --force`.
 It never uses `--all` or any system-, image-, container-, or volume-prune action.

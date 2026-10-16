@@ -14,7 +14,6 @@ use cacheferret::{
     Error, NativeCleanReport, NativeDiagnostic, NativeReport, NativeResource, ScanReport,
     ScopeFilter, clean_candidates, discover_with_progress_prioritized, format_bytes,
     format_signed_bytes, inspect_docker, preview_docker_build_cache, prune_docker_build_cache,
-    refresh_candidate,
 };
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -263,7 +262,7 @@ enum WorkerMessage {
     ScanFinished(Result<ScanReport, Error>),
     NativeInspected(NativeReport),
     Review {
-        candidates: Result<Vec<CacheCandidate>, Error>,
+        candidates: Vec<CacheCandidate>,
         native: Option<Result<NativeResource, NativeDiagnostic>>,
         confirmed: bool,
     },
@@ -288,12 +287,16 @@ struct App {
     visible: Vec<usize>,
     visible_measuring: Vec<usize>,
     native_resources: Vec<NativeResource>,
+    native_inspecting: bool,
+    native_status: Option<String>,
     visible_native: Vec<usize>,
     warnings: Vec<String>,
     scan_discovered: usize,
     scan_pending_paths: HashSet<PathBuf>,
     scan_measured_paths: HashSet<PathBuf>,
     refreshing: bool,
+    scan_active: bool,
+    removed_during_scan: HashSet<PathBuf>,
     cursor: usize,
     focus_user_owned: bool,
     query: String,
@@ -347,12 +350,16 @@ impl App {
             visible: Vec::new(),
             visible_measuring: Vec::new(),
             native_resources: Vec::new(),
+            native_inspecting: false,
+            native_status: None,
             visible_native: Vec::new(),
             warnings: Vec::new(),
             scan_discovered: 0,
             scan_pending_paths: HashSet::new(),
             scan_measured_paths: HashSet::new(),
             refreshing: false,
+            scan_active: false,
+            removed_during_scan: HashSet::new(),
             cursor: 0,
             focus_user_owned: false,
             query: String::new(),
@@ -655,6 +662,18 @@ impl App {
         self.move_cursor(1);
     }
 
+    fn candidate_is_current(&self, candidate: &CacheCandidate) -> bool {
+        !self.refreshing || self.scan_measured_paths.contains(&candidate.path)
+    }
+
+    fn browsing_phase(&self) -> Phase {
+        if self.scan_active {
+            Phase::Scanning
+        } else {
+            Phase::Ready
+        }
+    }
+
     fn toggle_scanning_selection(&mut self) {
         self.focus_user_owned = true;
         if self.focused_native_index().is_some() {
@@ -687,7 +706,7 @@ impl App {
             .visible
             .iter()
             .map(|index| &self.candidates[*index])
-            .filter(|candidate| candidate.cleanable)
+            .filter(|candidate| candidate.cleanable && self.candidate_is_current(candidate))
             .map(|candidate| candidate.path.clone())
             .collect();
         let visible_native: Vec<String> = self
@@ -724,6 +743,8 @@ impl App {
     fn begin_scan(&mut self, tx: &Sender<WorkerMessage>) {
         let focused = self.focused_key();
         self.phase = Phase::Scanning;
+        self.scan_active = true;
+        self.removed_during_scan.clear();
         self.scan_started = Instant::now();
         self.refreshing = !self.candidates.is_empty() || !self.remembered.is_empty();
         if !self.candidates.is_empty() {
@@ -759,12 +780,8 @@ impl App {
         self.error = None;
         self.toast = None;
         self.rebuild_visible_preserving(focused.as_ref());
-        if self.options.kinds.is_empty() && self.options.scope != ScopeFilter::Project {
-            let native_tx = tx.clone();
-            std::thread::spawn(move || {
-                let _ = native_tx.send(WorkerMessage::NativeInspected(inspect_docker()));
-            });
-        } else {
+        self.begin_native_inspection(tx);
+        if !self.options.kinds.is_empty() || self.options.scope == ScopeFilter::Project {
             self.native_resources.clear();
             self.visible_native.clear();
         }
@@ -798,9 +815,27 @@ impl App {
         });
     }
 
+    fn begin_native_inspection(&mut self, tx: &Sender<WorkerMessage>) {
+        if self.native_inspecting
+            || !self.options.kinds.is_empty()
+            || self.options.scope == ScopeFilter::Project
+        {
+            return;
+        }
+        self.native_inspecting = true;
+        self.native_status = None;
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(WorkerMessage::NativeInspected(inspect_docker()));
+        });
+    }
+
     fn handle_worker(&mut self, message: WorkerMessage, tx: &Sender<WorkerMessage>) {
         match message {
             WorkerMessage::ScanDiscovered(cache) => {
+                if self.removed_during_scan.contains(&cache.path) {
+                    return;
+                }
                 let focused = self.focused_key();
                 if self.scan_pending_paths.insert(cache.path.clone()) {
                     self.scan_discovered += 1;
@@ -819,6 +854,9 @@ impl App {
                 }
             }
             WorkerMessage::ScanMeasured(candidate) => {
+                if self.removed_during_scan.contains(&candidate.path) {
+                    return;
+                }
                 let focused = self.focused_key();
                 self.scan_pending_paths.remove(&candidate.path);
                 self.scan_measured_paths.insert(candidate.path.clone());
@@ -846,19 +884,30 @@ impl App {
             WorkerMessage::ScanWarning(warning) => self.warnings.push(warning),
             WorkerMessage::ScanFinished(Ok(report)) => {
                 let focused = self.focused_key();
-                self.candidates = report.candidates;
+                self.scan_active = false;
+                self.candidates = report
+                    .candidates
+                    .into_iter()
+                    .filter(|candidate| !self.removed_during_scan.contains(&candidate.path))
+                    .collect();
                 self.measuring.clear();
                 self.remembered.clear();
                 self.scan_pending_paths.clear();
                 self.warnings = report.warnings;
-                self.phase = Phase::Ready;
+                if self.phase == Phase::Scanning {
+                    self.phase = Phase::Ready;
+                }
                 self.selected.retain(|path| {
                     self.candidates
                         .iter()
                         .any(|candidate| candidate.path == *path)
                 });
                 self.rebuild_visible_preserving(focused.as_ref());
-                if self.candidates.is_empty() && self.native_resources.is_empty() {
+                if self.phase == Phase::Ready
+                    && self.candidates.is_empty()
+                    && self.native_resources.is_empty()
+                    && !self.native_inspecting
+                {
                     self.toast = Some((
                         "No caches found — your disk is already tidy".to_owned(),
                         Instant::now(),
@@ -867,14 +916,20 @@ impl App {
                 self.refreshing = false;
             }
             WorkerMessage::ScanFinished(Err(error)) => {
+                let focused = self.focused_key();
+                self.scan_active = false;
                 self.error = Some(error.to_string());
                 self.measuring.clear();
                 self.remembered.clear();
                 self.scan_pending_paths.clear();
-                if self.candidates.is_empty() && self.native_resources.is_empty() {
-                    self.phase = Phase::Failed;
-                } else {
-                    self.phase = Phase::Ready;
+                if self.phase == Phase::Scanning {
+                    self.phase = if self.candidates.is_empty() && self.native_resources.is_empty() {
+                        Phase::Failed
+                    } else {
+                        Phase::Ready
+                    };
+                }
+                if self.phase == Phase::Ready {
                     self.toast = Some((
                         if self.refreshing {
                             format!("Refresh failed — showing previous results · {error}")
@@ -885,8 +940,19 @@ impl App {
                     ));
                 }
                 self.refreshing = false;
+                self.rebuild_visible_preserving(focused.as_ref());
             }
             WorkerMessage::NativeInspected(report) => {
+                self.native_inspecting = false;
+                self.native_status = report.diagnostics.first().map(|diagnostic| {
+                    if diagnostic.kind == "timeout" {
+                        "Docker inspection timed out; r retry".to_owned()
+                    } else if !report.available {
+                        format!("Docker: {}", diagnostic.message)
+                    } else {
+                        "Some Docker storage could not be read; r retry".to_owned()
+                    }
+                });
                 let focused = self.focused_key();
                 self.native_resources = report.resources;
                 self.selected_native.retain(|kind| {
@@ -904,21 +970,6 @@ impl App {
                         ),
                         Instant::now(),
                     ));
-                } else if !report.available
-                    && let Some(diagnostic) = report.diagnostics.first()
-                {
-                    self.toast = Some((
-                        format!("Docker storage unavailable · {}", diagnostic.message),
-                        Instant::now(),
-                    ));
-                } else if !report.diagnostics.is_empty() {
-                    self.toast = Some((
-                        format!(
-                            "{} Docker storage rows could not be read",
-                            report.diagnostics.len()
-                        ),
-                        Instant::now(),
-                    ));
                 } else if !self.native_resources.is_empty()
                     && self
                         .toast
@@ -929,14 +980,14 @@ impl App {
                 }
             }
             WorkerMessage::Review {
-                candidates: Ok(candidates),
+                candidates,
                 native,
                 confirmed,
             } => {
                 let native = match native {
                     Some(Ok(resource)) => Some(resource),
                     Some(Err(diagnostic)) => {
-                        self.phase = Phase::Ready;
+                        self.phase = self.browsing_phase();
                         self.deleting.clear();
                         self.deleting_native = false;
                         self.toast = Some((
@@ -950,15 +1001,6 @@ impl App {
                     }
                     None => None,
                 };
-                for candidate in &candidates {
-                    if let Some(current) = self
-                        .candidates
-                        .iter_mut()
-                        .find(|current| current.path == candidate.path)
-                    {
-                        *current = candidate.clone();
-                    }
-                }
                 if let Some(resource) = &native
                     && let Some(current) = self
                         .native_resources
@@ -977,7 +1019,7 @@ impl App {
                 });
                 self.rebuild_visible();
                 if candidates.is_empty() && native.is_none() {
-                    self.phase = Phase::Ready;
+                    self.phase = self.browsing_phase();
                     self.deleting.clear();
                     self.deleting_native = false;
                     self.toast = Some((
@@ -994,23 +1036,17 @@ impl App {
                     self.phase = Phase::Confirming;
                 }
             }
-            WorkerMessage::Review {
-                candidates: Err(error),
-                ..
-            } => {
-                self.phase = Phase::Ready;
-                self.deleting.clear();
-                self.deleting_native = false;
-                self.toast = Some((
-                    format!("Cache changed; scan again · {error}"),
-                    Instant::now(),
-                ));
-            }
             WorkerMessage::Clean { filesystem, native } => {
                 let native = *native;
                 let cleaned: HashSet<PathBuf> = filesystem.cleaned_paths.iter().cloned().collect();
+                self.removed_during_scan.extend(cleaned.iter().cloned());
                 self.candidates
                     .retain(|candidate| !cleaned.contains(&candidate.path));
+                self.measuring
+                    .retain(|candidate| !cleaned.contains(&candidate.path));
+                self.scan_pending_paths
+                    .retain(|path| !cleaned.contains(path));
+                self.remembered.retain(|path, _| !cleaned.contains(path));
                 self.selected.retain(|path| !cleaned.contains(path));
                 let native_message = match native {
                     Some(Ok(report)) => {
@@ -1044,7 +1080,7 @@ impl App {
                 };
                 self.deleting.clear();
                 self.deleting_native = false;
-                self.phase = Phase::Ready;
+                self.phase = self.browsing_phase();
                 let message = match (filesystem.selected, native_message) {
                     (0, Some(native)) => native,
                     (_, Some(native)) => format!(
@@ -1084,6 +1120,10 @@ impl App {
                 Vec::new()
             } else {
                 let Some(index) = self.focused_index() else {
+                    self.toast = Some((
+                        "Wait for this cache to finish sizing before deleting it".to_owned(),
+                        Instant::now(),
+                    ));
                     return;
                 };
                 let candidate = self.candidates[index].clone();
@@ -1099,6 +1139,16 @@ impl App {
         } else {
             self.selected_candidates()
         };
+        if candidates
+            .iter()
+            .any(|candidate| !self.candidate_is_current(candidate))
+        {
+            self.toast = Some((
+                "Wait for selected caches to finish refreshing".to_owned(),
+                Instant::now(),
+            ));
+            return;
+        }
         if !candidates.is_empty() || native.is_some() {
             self.review_operation(candidates, native, false, tx);
         }
@@ -1106,7 +1156,7 @@ impl App {
 
     fn confirm_delete(&mut self, tx: &Sender<WorkerMessage>) {
         if self.pending_delete.is_empty() && self.pending_native.is_none() {
-            self.phase = Phase::Ready;
+            self.phase = self.browsing_phase();
             return;
         }
         let candidates = std::mem::take(&mut self.pending_delete);
@@ -1119,7 +1169,7 @@ impl App {
         self.pending_native = None;
         self.deleting.clear();
         self.deleting_native = false;
-        self.phase = Phase::Ready;
+        self.phase = self.browsing_phase();
     }
 
     fn review_operation(
@@ -1129,6 +1179,19 @@ impl App {
         confirmed: bool,
         tx: &Sender<WorkerMessage>,
     ) {
+        // Filesystem measurements already arrived with the visible rows. Only
+        // Docker needs a provider refresh; the cleaner validates paths at removal.
+        if native.is_none() {
+            self.handle_worker(
+                WorkerMessage::Review {
+                    candidates,
+                    native: None,
+                    confirmed,
+                },
+                tx,
+            );
+            return;
+        }
         self.phase = Phase::Reviewing;
         self.scan_started = Instant::now();
         self.deleting = candidates
@@ -1138,10 +1201,6 @@ impl App {
         self.deleting_native = native.is_some();
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let candidates = candidates
-                .iter()
-                .map(|candidate| refresh_candidate(candidate, RECENT_DAYS))
-                .collect();
             let native = native.map(|_| preview_docker_build_cache());
             let _ = tx.send(WorkerMessage::Review {
                 candidates,
@@ -1448,13 +1507,9 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<WorkerMessage>) {
                 app.cursor = 0;
                 app.rebuild_visible();
             }
-            KeyCode::Char('a') | KeyCode::Char('d') => {
-                app.focus_user_owned = true;
-                app.toast = Some((
-                    "Finish sizing before batch selection or deletion".to_owned(),
-                    Instant::now(),
-                ));
-            }
+            KeyCode::Char('a') => app.toggle_visible_selection(),
+            KeyCode::Char('d') => app.begin_delete(tx),
+            KeyCode::Char('r') => app.begin_native_inspection(tx),
             _ => {}
         },
         Phase::Confirming => match key.code {
@@ -1698,9 +1753,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|index| {
             let candidate = &app.candidates[*index];
             let is_selected = app.selected.contains(&candidate.path);
-            let current = app.phase != Phase::Scanning
-                || !app.refreshing
-                || app.scan_measured_paths.contains(&candidate.path);
+            let current = app.candidate_is_current(candidate);
             let marker = if is_selected {
                 Span::styled(
                     if app.ui.unicode { "✓" } else { "x" },
@@ -2138,7 +2191,11 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
             && app.measuring.is_empty()
             && app.native_resources.is_empty()
         {
-            "No caches found. Enjoy the breathing room.".to_owned()
+            if app.native_inspecting || app.native_status.is_some() {
+                "No filesystem caches found.".to_owned()
+            } else {
+                "No caches found. Enjoy the breathing room.".to_owned()
+            }
         } else {
             "No caches match this view. Press Esc to clear the filter.".to_owned()
         };
@@ -2166,25 +2223,8 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
     };
     let selected = app.selected.contains(&candidate.path);
     let separator = app.ui.separator();
-    let action = if app.phase == Phase::Scanning {
-        let current = !app.refreshing || app.scan_measured_paths.contains(&candidate.path);
-        let value = if !current {
-            "Refreshing measurement".to_owned()
-        } else if !candidate.cleanable && !selected {
-            format!("Space override{separator}scan-only")
-        } else if selected {
-            format!("selected{separator}Space unselect{separator}delete when ready")
-        } else {
-            format!("Space select{separator}delete when ready")
-        };
-        Span::styled(
-            value,
-            Style::default().fg(if current {
-                palette.accent
-            } else {
-                palette.muted
-            }),
-        )
+    let action = if !app.candidate_is_current(candidate) {
+        Span::styled("Refreshing measurement", Style::default().fg(palette.muted))
     } else if !candidate.cleanable && !selected {
         Span::styled(
             format!("Space override{separator}scan-only"),
@@ -2346,8 +2386,26 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         footer_shortcuts(app, area.width)
     };
+    let mut lines = vec![content];
+    if app.view_scope != ViewScope::Project {
+        if app.native_inspecting {
+            lines.push(Line::from(Span::styled(
+                if app.ui.unicode {
+                    "  Checking Docker storage…"
+                } else {
+                    "  Checking Docker storage..."
+                },
+                Style::default().fg(palette.info),
+            )));
+        } else if let Some(status) = &app.native_status {
+            lines.push(Line::from(Span::styled(
+                format!("  {status}"),
+                Style::default().fg(palette.muted),
+            )));
+        }
+    }
     frame.render_widget(
-        Paragraph::new(content)
+        Paragraph::new(lines)
             .style(Style::default().bg(palette.surface).fg(palette.text))
             .alignment(Alignment::Left),
         area,
@@ -2413,24 +2471,24 @@ fn scanning_shortcuts(app: &App, width: u16) -> Line<'static> {
     if app.visible_len() == 0 {
         return Line::from(vec![key("q", palette), hint("quit", palette)]);
     }
-    if width < 76 {
-        return Line::from(vec![
-            key(movement, palette),
-            hint("move", palette),
-            key("/", palette),
-            hint("filter", palette),
-            key("q", palette),
-            hint("quit", palette),
-        ]);
-    }
     let mut spans = vec![key(movement, palette), hint("move", palette)];
-    if app.focused_index().is_some()
+    let selectable = app
+        .focused_index()
+        .is_some_and(|index| app.candidate_is_current(&app.candidates[index]))
         || app
             .focused_native_index()
-            .is_some_and(|index| app.native_resources[index].cleanable)
-    {
+            .is_some_and(|index| app.native_resources[index].cleanable);
+    if selectable {
         spans.extend([key("space", palette), hint("select", palette)]);
     }
+    if app.selected_count() > 0 || selectable {
+        spans.extend([key("d", palette), hint("delete", palette)]);
+    }
+    if width < 76 {
+        spans.extend([key("/", palette), hint("filter", palette)]);
+        return Line::from(spans);
+    }
+    spans.extend([key("a", palette), hint("all", palette)]);
     spans.extend([
         key("/", palette),
         hint("filter", palette),
@@ -2565,27 +2623,13 @@ fn render_error(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_reviewing(frame: &mut Frame, area: Rect, app: &App) {
-    let detail = if app.deleting_native && app.deleting.is_empty() {
-        "Refreshing Docker's build-cache estimate before prune".to_owned()
-    } else if app.deleting_native {
-        format!(
-            "Remeasuring {} filesystem caches and Docker build cache",
-            app.deleting.len()
-        )
-    } else if app.deleting.len() > 1 {
-        format!(
-            "Remeasuring {} selected caches before delete",
-            app.deleting.len()
-        )
-    } else {
-        "Remeasuring size and recent activity before delete".to_owned()
-    };
+    let detail = "Refreshing Docker's build-cache estimate before prune";
     render_progress_modal(
         frame,
         area,
         app,
         "Checking current cache state",
-        &detail,
+        detail,
         " Check ",
     );
 }
@@ -2838,7 +2882,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     if !compact {
         lines.push(Line::from(Span::styled(
             if app.phase == Phase::Scanning {
-                "Sizing rows can be inspected; cleanup unlocks when measurement finishes."
+                "Measured caches can be deleted while the rest of the scan continues."
             } else if app.ui.unicode {
                 "× override · Docker build cache confirms · — other Docker rows inspect-only."
             } else {
@@ -3175,6 +3219,9 @@ mod tests {
             &tx,
         );
         assert!(app.selected.is_empty());
+        app.begin_delete(&tx);
+        assert_eq!(app.phase, Phase::Scanning);
+        assert!(app.pending_delete.is_empty());
     }
 
     #[test]
@@ -3281,32 +3328,139 @@ mod tests {
     }
 
     #[test]
-    fn scanning_workspace_remains_keyboard_navigable_but_not_deletable() {
-        let (_temp, _target, mut app) = project_app();
+    fn measured_cache_can_be_deleted_before_scan_finishes_without_resurrection() {
+        let (_temp, target, mut app) = project_app();
         app.phase = Phase::Scanning;
-        app.refreshing = false;
-        let path = app.focused_path().unwrap();
-        app.scan_measured_paths.insert(path);
-        let (tx, _rx) = mpsc::channel();
+        app.scan_active = true;
+        let candidate = app.candidates[0].clone();
+        let (tx, rx) = mpsc::channel();
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-            &tx,
-        );
-        assert_eq!(app.selected.len(), 1);
-
+        for width in [60, 80, 120] {
+            let output = render_text(&mut app, width, 24);
+            assert!(output.contains("d delete"), "{output}");
+            assert!(!output.contains("delete when ready"), "{output}");
+        }
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &tx,
         );
-        assert_eq!(app.phase, Phase::Scanning);
+        assert_eq!(app.phase, Phase::Confirming);
         assert!(
-            app.toast
-                .as_ref()
-                .is_some_and(|(message, _)| message.contains("Finish sizing"))
+            rx.try_recv().is_err(),
+            "confirmation needs no background measurement"
         );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Cleaning);
+        receive_worker(&mut app, &tx, &rx);
+        assert!(!target.exists());
+        assert_eq!(app.phase, Phase::Scanning);
+
+        app.handle_worker(
+            WorkerMessage::ScanDiscovered(discovered(candidate.path.clone())),
+            &tx,
+        );
+        app.handle_worker(WorkerMessage::ScanMeasured(candidate.clone()), &tx);
+        assert!(app.candidates.is_empty());
+        assert!(app.measuring.is_empty());
+        app.handle_worker(
+            WorkerMessage::ScanFinished(Ok(ScanReport {
+                candidates: vec![candidate],
+                warnings: Vec::new(),
+            })),
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Ready);
+        assert!(app.candidates.is_empty());
+    }
+
+    #[test]
+    fn scan_completion_does_not_dismiss_confirmation_or_cleanup() {
+        for finish_during_cleanup in [false, true] {
+            let (_temp, target, mut app) = project_app();
+            app.phase = Phase::Scanning;
+            app.scan_active = true;
+            let candidates = app.candidates.clone();
+            let (tx, rx) = mpsc::channel();
+            app.begin_delete(&tx);
+            if finish_during_cleanup {
+                app.confirm_delete(&tx);
+            }
+            let phase = app.phase;
+            app.handle_worker(
+                WorkerMessage::ScanFinished(Ok(ScanReport {
+                    candidates,
+                    warnings: Vec::new(),
+                })),
+                &tx,
+            );
+            assert_eq!(app.phase, phase);
+            if !finish_during_cleanup {
+                app.confirm_delete(&tx);
+            }
+            receive_worker(&mut app, &tx, &rx);
+            assert_eq!(app.phase, Phase::Ready);
+            assert!(!target.exists());
+            assert!(app.candidates.is_empty());
+        }
+    }
+
+    #[test]
+    fn scan_failure_does_not_dismiss_confirmation_and_cancel_resumes_scan() {
+        let (_temp, target, mut app) = project_app();
+        app.phase = Phase::Scanning;
+        app.scan_active = true;
+        let (tx, _rx) = mpsc::channel();
+        app.handle_worker(
+            WorkerMessage::ScanDiscovered(discovered(PathBuf::from("/work/sizing/target"))),
+            &tx,
+        );
+        app.begin_delete(&tx);
+        app.cancel_delete();
+        assert_eq!(app.phase, Phase::Scanning);
+        app.begin_delete(&tx);
+        app.handle_worker(
+            WorkerMessage::ScanFinished(Err(Error::InvalidPath {
+                path: PathBuf::from("/missing"),
+            })),
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Confirming);
+        assert!(render_text(&mut app, 80, 24).contains("Confirm delete"));
+        app.cancel_delete();
+        assert_eq!(app.phase, Phase::Ready);
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn scanning_batch_selects_only_current_measurements() {
+        let (_temp, _targets, mut app) = two_project_app();
+        app.phase = Phase::Scanning;
+        app.scan_active = true;
+        app.refreshing = true;
+        let candidate = app.candidates[0].clone();
+        let (tx, _rx) = mpsc::channel();
+        app.begin_delete(&tx);
+        assert_eq!(app.phase, Phase::Scanning);
+        app.handle_worker(WorkerMessage::ScanMeasured(candidate.clone()), &tx);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.selected, HashSet::from([candidate.path.clone()]));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &tx,
+        );
+        assert_eq!(app.phase, Phase::Confirming);
+        assert_eq!(app.pending_delete.len(), 1);
+        assert_eq!(app.pending_delete[0].path, candidate.path);
     }
 
     #[test]
@@ -3417,8 +3571,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &tx,
         );
-        assert_eq!(app.phase, Phase::Reviewing);
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Confirming);
         assert_eq!(app.pending_delete.len(), 2);
         assert!(render_text(&mut app, 80, 24).contains("Delete 2 selected caches?"));
@@ -3428,7 +3580,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
             &tx,
         );
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Cleaning);
         receive_worker(&mut app, &tx, &rx);
 
@@ -3469,8 +3620,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &tx,
         );
-        assert_eq!(app.phase, Phase::Reviewing);
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Confirming);
         handle_key(
             &mut app,
@@ -3484,15 +3633,12 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &tx,
         );
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Confirming);
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
             &tx,
         );
-        assert_eq!(app.phase, Phase::Reviewing);
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Cleaning);
         receive_worker(&mut app, &tx, &rx);
 
@@ -3528,7 +3674,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &tx,
         );
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Confirming);
         assert!(render_text(&mut app, 80, 24).contains("manual override"));
         assert!(target.exists());
@@ -3538,7 +3683,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
             &tx,
         );
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Cleaning);
         receive_worker(&mut app, &tx, &rx);
 
@@ -3577,8 +3721,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             &tx,
         );
-        assert_eq!(app.phase, Phase::Reviewing);
-        receive_worker(&mut app, &tx, &rx);
         assert_eq!(app.phase, Phase::Cleaning);
         receive_worker(&mut app, &tx, &rx);
 
@@ -3606,22 +3748,27 @@ mod tests {
     }
 
     #[test]
-    fn stale_safe_candidate_is_reclassified_before_delete() {
+    fn deletion_reuses_displayed_measurement_but_still_checks_ownership() {
         let (_temp, target, mut app) = project_app();
-        app.candidates[0].age_days = Some(30);
-        app.candidates[0].protected = false;
+        let measured_bytes = app.candidates[0].bytes;
+        fs::write(target.join("new-artifact"), [0_u8; 128]).unwrap();
         let (tx, rx) = mpsc::channel();
-
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-            &tx,
-        );
-        receive_worker(&mut app, &tx, &rx);
-
+        app.begin_delete(&tx);
         assert_eq!(app.phase, Phase::Confirming);
-        assert_eq!(app.pending_delete[0].age_days, Some(0));
+        assert_eq!(app.pending_delete[0].bytes, measured_bytes);
+        assert!(rx.try_recv().is_err());
+        fs::remove_file(target.parent().unwrap().join("Cargo.toml")).unwrap();
+        app.confirm_delete(&tx);
+        assert_eq!(app.phase, Phase::Cleaning);
+        receive_worker(&mut app, &tx, &rx);
         assert!(target.exists());
+        assert!(
+            app.toast
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("ownership markers disappeared")
+        );
     }
 
     #[test]
@@ -3693,6 +3840,97 @@ mod tests {
         assert!(output.contains("recent"));
         assert!(output.contains("d / y"));
         assert!(output.contains("n / Esc"));
+    }
+
+    #[test]
+    fn pending_docker_inspection_stays_visible_without_blocking_filesystem_cleanup() {
+        let (_temp, target, mut app) = project_app();
+        app.native_inspecting = true;
+        app.phase = Phase::Scanning;
+        let candidates = app.candidates.clone();
+        let (tx, _rx) = mpsc::channel();
+        app.handle_worker(
+            WorkerMessage::ScanFinished(Ok(ScanReport {
+                candidates,
+                warnings: Vec::new(),
+            })),
+            &tx,
+        );
+
+        assert_eq!(app.phase, Phase::Ready);
+        for (width, height) in [(58, 16), (80, 24), (120, 30)] {
+            let output = render_text(&mut app, width, height);
+            assert!(output.contains("Checking Docker storage"), "{output}");
+            assert!(output.contains("d delete"), "{output}");
+        }
+        app.ui = UiPreferences::from_values(true, Some("dumb"), None, Some("C"), true, true);
+        let output = render_text(&mut app, 80, 24);
+        assert!(output.contains("Checking Docker storage..."), "{output}");
+        assert!(!output.contains('…'), "{output}");
+        app.begin_delete(&tx);
+        assert_eq!(app.phase, Phase::Confirming);
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn pending_docker_inspection_does_not_claim_an_empty_disk() {
+        let mut app = test_app(options());
+        app.native_inspecting = true;
+        let (tx, _rx) = mpsc::channel();
+        app.handle_worker(
+            WorkerMessage::ScanFinished(Ok(ScanReport {
+                candidates: Vec::new(),
+                warnings: Vec::new(),
+            })),
+            &tx,
+        );
+        assert!(app.toast.is_none());
+        let output = render_text(&mut app, 80, 24);
+        assert!(output.contains("No filesystem caches found"), "{output}");
+        assert!(output.contains("Checking Docker storage"), "{output}");
+    }
+
+    #[test]
+    fn docker_timeout_stays_explicit_until_successful_retry() {
+        let (_temp, _target, mut app) = project_app();
+        app.native_inspecting = true;
+        let (tx, _rx) = mpsc::channel();
+        app.handle_worker(
+            WorkerMessage::NativeInspected(NativeReport {
+                provider: "docker".to_owned(),
+                available: false,
+                resources: Vec::new(),
+                diagnostics: vec![NativeDiagnostic {
+                    provider: "docker".to_owned(),
+                    kind: "timeout".to_owned(),
+                    message: "Docker storage inspection timed out after 60 seconds".to_owned(),
+                    retryable: true,
+                }],
+            }),
+            &tx,
+        );
+        assert!(!app.native_inspecting);
+        assert!(app.toast.is_none());
+        app.toast = None;
+        let output = render_text(&mut app, 58, 16);
+        assert!(
+            output.contains("Docker inspection timed out; r retry"),
+            "{output}"
+        );
+        assert!(!output.contains("Checking Docker storage"), "{output}");
+
+        app.native_inspecting = true;
+        app.handle_worker(
+            WorkerMessage::NativeInspected(NativeReport {
+                provider: "docker".to_owned(),
+                available: true,
+                resources: Vec::new(),
+                diagnostics: Vec::new(),
+            }),
+            &tx,
+        );
+        assert!(!app.native_inspecting);
+        assert!(app.native_status.is_none());
     }
 
     #[test]
@@ -3786,7 +4024,7 @@ mod tests {
 
         app.handle_worker(
             WorkerMessage::Review {
-                candidates: Ok(Vec::new()),
+                candidates: Vec::new(),
                 native: Some(Ok(resource)),
                 confirmed: false,
             },
