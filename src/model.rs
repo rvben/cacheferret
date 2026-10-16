@@ -268,6 +268,9 @@ pub struct CleanReport {
     pub filesystem_deltas: Vec<FilesystemSpaceDelta>,
     pub selected_targets: Vec<CleanTarget>,
     pub cleaned_paths: Vec<PathBuf>,
+    /// Cleaned paths whose removal the owning tool accepted but has not
+    /// finished; their size is not counted in the removed-bytes estimates.
+    pub deferred_paths: Vec<PathBuf>,
     pub skipped_paths: Vec<SkippedPath>,
 }
 

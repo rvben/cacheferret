@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::model::{FilesystemSpaceDelta, SkippedPath};
-use crate::native;
+use crate::native::{self, Removal};
 use crate::scanner::revalidate_for_delete;
 use crate::{CacheCandidate, CleanReport};
 
@@ -78,11 +78,13 @@ where
             filesystem_deltas: Vec::new(),
             selected_targets,
             cleaned_paths: Vec::new(),
+            deferred_paths: Vec::new(),
             skipped_paths: Vec::new(),
         };
     }
 
     let mut cleaned_paths = Vec::new();
+    let mut deferred_paths = Vec::new();
     let mut skipped_paths = Vec::new();
     let mut reclaimed = 0_u64;
     let mut allocated_removed = 0_u64;
@@ -111,9 +113,13 @@ where
             continue;
         }
         match remove_candidate(candidate) {
-            Ok(()) => {
-                reclaimed = reclaimed.saturating_add(candidate.bytes);
-                allocated_removed = allocated_removed.saturating_add(candidate.allocated_bytes);
+            Ok(removal) => {
+                if removal == Removal::Complete {
+                    reclaimed = reclaimed.saturating_add(candidate.bytes);
+                    allocated_removed = allocated_removed.saturating_add(candidate.allocated_bytes);
+                } else {
+                    deferred_paths.push(candidate.path.clone());
+                }
                 if let Some(id) = candidate_filesystems.get(&candidate.path) {
                     cleaned_filesystems.insert(*id);
                 }
@@ -166,17 +172,18 @@ where
         filesystem_deltas,
         selected_targets,
         cleaned_paths,
+        deferred_paths,
         skipped_paths,
     }
 }
 
 /// Native kinds are removed by the tool that owns them; everything else is a
 /// directory that is deleted in place.
-fn remove_candidate(candidate: &CacheCandidate) -> io::Result<()> {
+fn remove_candidate(candidate: &CacheCandidate) -> io::Result<Removal> {
     if native::handles(&candidate.kind) {
         native::remove(candidate)
     } else {
-        remove_cache_directory(candidate)
+        remove_cache_directory(candidate).map(|()| Removal::Complete)
     }
 }
 

@@ -138,6 +138,7 @@ pub fn contract() -> Value {
                         }
                     },
                     {"name": "cleaned_paths", "type": "array", "items": {"type": "string"}},
+                    {"name": "deferred_paths", "type": "array", "items": {"type": "string"}},
                     {
                         "name": "skipped_paths",
                         "type": "array",

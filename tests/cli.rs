@@ -1091,3 +1091,609 @@ fn rustup_settings_that_are_not_understood_offer_nothing() {
         "{scan}"
     );
 }
+
+/// Fake `xcrun` serving recorded `simctl` JSON and performing deletions, with
+/// simulator devices whose directories exist on disk. After the first listing
+/// the fake serves `devices-later.json` and `runtimes-later.json` when they exist, so a state
+/// change between scanning and cleaning can be reproduced.
+#[cfg(unix)]
+struct SimctlFixture {
+    temp: TempDir,
+    devices_root: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl SimctlFixture {
+    const LARGE: &'static str = "2B5F8808-A600-48F0-9750-81CCBA294022";
+    const SMALL: &'static str = "7A1C3F10-0000-4000-8000-000000000001";
+    const IOS_RUNTIME: &'static str = "38BB7EA4-FB30-4597-A6EA-C38FEC38B89C";
+    const WATCH_RUNTIME: &'static str = "5C29E7B8-A172-4CC5-B491-8F4DDA3C9AB2";
+    /// 2023-11-14T22:13:20Z, far older than the protection window; the
+    /// directories hold the current time.
+    const APP_LAST_USED_UNIX: u64 = 1_700_000_000;
+    const LOCKED_RUNTIME: &'static str = "15CCF121-0865-4533-B65E-582CB34C5835";
+
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let devices_root = temp.path().join("CoreSimulator/Devices");
+        for (udid, bytes) in [(Self::LARGE, 70 * 1024 * 1024), (Self::SMALL, 1024)] {
+            let data = devices_root.join(udid).join("data");
+            fs::create_dir_all(&data).unwrap();
+            fs::File::create(data.join("store"))
+                .unwrap()
+                .set_len(bytes)
+                .unwrap();
+        }
+        let large = devices_root.join(Self::LARGE);
+        let app =
+            large.join("data/Containers/Bundle/Application/33333333-3333-4333-8333-333333333333");
+        fs::create_dir_all(app.join("Example.app")).unwrap();
+        let container =
+            large.join("data/Containers/Data/Application/44444444-4444-4444-8444-444444444444");
+        fs::create_dir_all(&container).unwrap();
+        // Files carry the last use; directory times are left at "now", as the
+        // system rewrites them without the device being used.
+        fs::write(container.join("state"), b"").unwrap();
+        for file in [container.join("state"), large.join("data/store")] {
+            fs::File::options()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_modified(
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(Self::APP_LAST_USED_UNIX),
+                )
+                .unwrap();
+        }
+        let fixture = Self { temp, devices_root };
+        fixture.set_devices("devices.json", "Shutdown");
+        fs::write(
+            fixture.temp.path().join("runtimes.json"),
+            format!(
+                r#"{{
+  "{ios}":{{"build":"23F77","deletable":true,"identifier":"{ios}","lastUsedAt":"2026-10-08T21:00:32Z","path":"/System/Library/AssetsV2/example/ios.dmg","runtimeIdentifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-2","sizeBytes":8000000000,"state":"Ready","version":"18.2"}},
+  "{watch}":{{"build":"22S99","deletable":true,"identifier":"{watch}","path":"/System/Library/AssetsV2/example/watch.dmg","runtimeIdentifier":"com.apple.CoreSimulator.SimRuntime.watchOS-11-2","sizeBytes":4000000000,"state":"Ready","version":"11.2"}},
+  "{locked}":{{"build":"23T570","deletable":false,"identifier":"{locked}","path":"/System/Library/AssetsV2/example/locked.dmg","runtimeIdentifier":"com.apple.CoreSimulator.SimRuntime.watchOS-26-5","sizeBytes":3000000000,"state":"Ready","version":"26.5"}}
+}}"#,
+                ios = Self::IOS_RUNTIME,
+                watch = Self::WATCH_RUNTIME,
+                locked = Self::LOCKED_RUNTIME,
+            ),
+        )
+        .unwrap();
+        let xcrun = fixture.temp.path().join("xcrun");
+        fs::write(
+            &xcrun,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CACHEFERRET_TEST_LOG"
+dir="${0%/*}"
+case "$1 $2 $3" in
+  "simctl list devices")
+    n=$(/bin/cat "$dir/list-count" 2>/dev/null || echo 0)
+    echo $((n + 1)) > "$dir/list-count"
+    if [ "$n" -ge 1 ] && [ -f "$dir/devices-later.json" ]; then /bin/cat "$dir/devices-later.json"; else /bin/cat "$dir/devices.json"; fi ;;
+  "simctl runtime list")
+    n=$(/bin/cat "$dir/runtime-count" 2>/dev/null || echo 0)
+    echo $((n + 1)) > "$dir/runtime-count"
+    if [ "$n" -ge 1 ] && [ -f "$dir/runtimes-later.json" ]; then /bin/cat "$dir/runtimes-later.json"; else /bin/cat "$dir/runtimes.json"; fi ;;
+  "simctl delete "*) /bin/rm -rf "$CACHEFERRET_TEST_DEVICES/$3" ;;
+  "simctl runtime delete")
+    # CoreSimulator finishes removal later unless the test asks for it now.
+    if [ -f "$dir/after-delete-$4.json" ]; then
+      /bin/cat "$dir/after-delete-$4.json" > "$dir/runtimes.json"
+    elif [ -f "$dir/sync-delete" ]; then
+      /usr/bin/grep -v "\"$4\"" "$dir/runtimes.json" > "$dir/runtimes.new"
+      /bin/cat "$dir/runtimes.new" > "$dir/runtimes.json"
+    fi ;;
+  *) echo "unexpected xcrun invocation: $*" >&2; exit 42 ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&xcrun, fs::Permissions::from_mode(0o755)).unwrap();
+        fixture
+    }
+
+    /// Write a device listing in which the large device has `state`.
+    fn set_devices(&self, file: &str, state: &str) {
+        let device = |udid: &str, name: &str, state: &str| {
+            format!(
+                r#"{{"dataPath":"{}/{udid}/data","udid":"{udid}","isAvailable":true,"state":"{state}","name":"{name}"}}"#,
+                self.devices_root.display()
+            )
+        };
+        fs::write(
+            self.temp.path().join(file),
+            format!(
+                r#"{{"devices":{{"com.apple.CoreSimulator.SimRuntime.iOS-18-2":[{},{}]}}}}"#,
+                device(Self::LARGE, "iPhone 16 Pro", state),
+                device(Self::SMALL, "iPhone 16", "Shutdown"),
+            ),
+        )
+        .unwrap();
+    }
+
+    fn log(&self) -> std::path::PathBuf {
+        self.temp.path().join("argv")
+    }
+
+    fn mutations(&self) -> Vec<String> {
+        fs::read_to_string(self.log())
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(" delete "))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        let out = Command::new(BIN)
+            .args(args)
+            .env("PATH", self.temp.path())
+            .env("CACHEFERRET_TEST_LOG", self.log())
+            .env("CACHEFERRET_TEST_DEVICES", &self.devices_root)
+            .output()
+            .expect("spawn binary");
+        Output {
+            code: out.status.code().unwrap(),
+            stdout: String::from_utf8(out.stdout).unwrap(),
+            stderr: String::from_utf8(out.stderr).unwrap(),
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn simulator_devices_are_listed_by_size_with_labels_and_known_ages() {
+    let fixture = SimctlFixture::new();
+    let out = fixture.run(&[
+        "scan",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-device",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let items = scan["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "the small device is not listed: {scan}");
+    let item = &items[0];
+    assert_eq!(item["label"], "iPhone 16 Pro (iOS 18.2)");
+    assert_eq!(item["bytes"], 70 * 1024 * 1024);
+    assert_eq!(item["network_restore"], false);
+    assert_eq!(item["cleanable"], true);
+    assert!(item["modified_unix"].is_u64());
+    assert!(
+        item["path"]
+            .as_str()
+            .unwrap()
+            .ends_with(SimctlFixture::LARGE)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_simulator_device_age_is_its_newest_file_and_ignores_directory_times() {
+    let fixture = SimctlFixture::new();
+    let out = fixture.run(&[
+        "scan",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-device",
+    ]);
+    let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let item = &scan["items"][0];
+    assert_eq!(
+        item["modified_unix"],
+        SimctlFixture::APP_LAST_USED_UNIX,
+        "{item}"
+    );
+    assert_eq!(item["protected"], false);
+}
+
+#[test]
+#[cfg(unix)]
+fn simulator_devices_without_installed_apps_are_not_listed() {
+    let fixture = SimctlFixture::new();
+    let apps = fixture
+        .devices_root
+        .join(SimctlFixture::LARGE)
+        .join("data/Containers/Bundle/Application");
+    fs::remove_dir_all(&apps).unwrap();
+    for state in ["missing", "empty"] {
+        if state == "empty" {
+            fs::create_dir_all(&apps).unwrap();
+        }
+        let out = fixture.run(&[
+            "scan",
+            "--scope",
+            "global",
+            "--kind",
+            "xcode-simulator-device",
+        ]);
+        assert_eq!(out.code, 0, "{state}: {}", out.stderr);
+        let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+        assert!(
+            scan["items"].as_array().unwrap().is_empty(),
+            "{state}: {scan}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn a_shut_down_simulator_device_is_deleted_with_simctl() {
+    let fixture = SimctlFixture::new();
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-device",
+        "--protect-days",
+        "0",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 1);
+    assert_eq!(
+        fixture.mutations(),
+        [format!("simctl delete {}", SimctlFixture::LARGE)]
+    );
+    assert!(!fixture.devices_root.join(SimctlFixture::LARGE).exists());
+    assert!(fixture.devices_root.join(SimctlFixture::SMALL).exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn a_device_that_boots_after_scanning_is_refused_before_deletion() {
+    let fixture = SimctlFixture::new();
+    fixture.set_devices("devices-later.json", "Booted");
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-device",
+        "--protect-days",
+        "0",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 5, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("refused"), "{}", out.stderr);
+    assert!(fixture.mutations().is_empty());
+    assert!(fixture.devices_root.join(SimctlFixture::LARGE).exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn simulator_runtimes_report_the_native_size_and_unknown_use() {
+    let fixture = SimctlFixture::new();
+    let out = fixture.run(&[
+        "scan",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let find = |label: &str| {
+        scan["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == label)
+            .unwrap_or_else(|| panic!("{label} not listed: {scan}"))
+    };
+
+    let used = find("iOS 18.2 (23F77)");
+    assert_eq!(used["bytes"], 8_000_000_000_u64);
+    assert_eq!(used["network_restore"], true);
+    assert_eq!(used["cleanable"], true);
+    assert_eq!(used["modified_unix"], 1_791_493_232_u64);
+
+    let never_used = find("watchOS 11.2 (22S99)");
+    assert_eq!(never_used["bytes"], 4_000_000_000_u64);
+    assert!(never_used["modified_unix"].is_null());
+    assert!(never_used["age_days"].is_null());
+    assert_eq!(never_used["protected"], true);
+
+    assert_eq!(find("watchOS 26.5 (23T570)")["cleanable"], false);
+}
+
+#[test]
+#[cfg(unix)]
+fn only_deletable_simulator_runtimes_are_removed_and_only_with_simctl() {
+    let fixture = SimctlFixture::new();
+    fs::write(fixture.temp.path().join("sync-delete"), "").unwrap();
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+        "--include-recent",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 2);
+    assert_eq!(report["policy_skipped"], 1);
+    assert_eq!(report["bytes_selected"], 12_000_000_000_u64);
+    assert_eq!(report["apparent_bytes_removed"], 12_000_000_000_u64);
+    assert_eq!(report["deferred_paths"], serde_json::json!([]));
+    let mut mutations = fixture.mutations();
+    mutations.sort();
+    assert_eq!(
+        mutations,
+        [
+            format!("simctl runtime delete {}", SimctlFixture::IOS_RUNTIME),
+            format!("simctl runtime delete {}", SimctlFixture::WATCH_RUNTIME),
+        ]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_runtime_used_by_a_booted_device_is_not_cleanable() {
+    let fixture = SimctlFixture::new();
+    fixture.set_devices("devices.json", "Booted");
+    let scan = fixture.run(&[
+        "scan",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+    ]);
+    let scan: serde_json::Value = serde_json::from_str(&scan.stdout).unwrap();
+    let cleanable = |label: &str| {
+        scan["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"].as_str().unwrap().starts_with(label))
+            .unwrap()["cleanable"]
+            .clone()
+    };
+    assert_eq!(cleanable("iOS"), false, "a booted device uses it: {scan}");
+    assert_eq!(cleanable("watchOS 11.2"), true);
+
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+        "--include-recent",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 1, "only the unused watchOS runtime goes");
+    assert_eq!(report["policy_skipped"], 2);
+    assert_eq!(
+        fixture.mutations(),
+        [format!(
+            "simctl runtime delete {}",
+            SimctlFixture::WATCH_RUNTIME
+        )]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_runtime_whose_device_boots_after_scanning_is_refused() {
+    let fixture = SimctlFixture::new();
+    fixture.set_devices("devices-later.json", "Booted");
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+        "--include-recent",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 1, "only the unused watchOS runtime goes");
+    assert_eq!(report["skipped"], 1);
+    let reason = report["skipped_paths"][0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("booted") && reason.contains("iPhone 16 Pro"),
+        "{reason}"
+    );
+    assert_eq!(
+        fixture.mutations(),
+        [format!(
+            "simctl runtime delete {}",
+            SimctlFixture::WATCH_RUNTIME
+        )]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_booted_simulator_device_is_not_cleanable() {
+    let fixture = SimctlFixture::new();
+    fixture.set_devices("devices.json", "Booted");
+    let out = fixture.run(&[
+        "scan",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-device",
+    ]);
+    let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(scan["items"][0]["cleanable"], false, "{scan}");
+}
+
+#[test]
+#[cfg(unix)]
+fn simulator_dry_run_never_deletes() {
+    let fixture = SimctlFixture::new();
+    for kind in ["xcode-simulator-device", "xcode-simulator-runtime"] {
+        let out = fixture.run(&[
+            "clean",
+            "--scope",
+            "global",
+            "--kind",
+            kind,
+            "--include-recent",
+            "--dry-run",
+        ]);
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    }
+    assert!(fixture.mutations().is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn a_runtime_that_stops_being_deletable_after_scanning_is_refused() {
+    let fixture = SimctlFixture::new();
+    let runtimes = fs::read_to_string(fixture.temp.path().join("runtimes.json")).unwrap();
+    let ios_entry = runtimes
+        .lines()
+        .find(|line| line.contains(SimctlFixture::IOS_RUNTIME))
+        .unwrap();
+    fs::write(
+        fixture.temp.path().join("runtimes-later.json"),
+        runtimes.replace(
+            ios_entry,
+            &ios_entry.replace("\"deletable\":true", "\"deletable\":false"),
+        ),
+    )
+    .unwrap();
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+        "--include-recent",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["skipped"], 1);
+    assert!(
+        report["skipped_paths"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not deletable")
+    );
+    assert!(
+        !fixture
+            .mutations()
+            .iter()
+            .any(|line| line.contains(SimctlFixture::IOS_RUNTIME))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_runtime_that_is_still_listed_after_deletion_is_reported_as_deferred() {
+    let fixture = SimctlFixture::new();
+    // Without `sync-delete` the fake keeps listing the runtimes after the
+    // delete command succeeds, as CoreSimulator does while it detaches them.
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+        "--include-recent",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 2);
+    assert_eq!(report["deferred_paths"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        report["apparent_bytes_removed"], 0,
+        "deferred removals are not counted as freed: {report}"
+    );
+    assert_eq!(report["allocated_bytes_removed_estimate"], 0);
+    assert_eq!(report["bytes_selected"], 12_000_000_000_u64);
+
+    let text = fixture.run(&[
+        "clean",
+        "-o",
+        "text",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+        "--include-recent",
+        "--yes",
+    ]);
+    assert!(text.stdout.contains("not finished"), "{}", text.stdout);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_deleted_runtime_still_listed_in_an_unparseable_entry_is_deferred() {
+    let fixture = SimctlFixture::new();
+    let runtimes = fs::read_to_string(fixture.temp.path().join("runtimes.json")).unwrap();
+    // After the delete the listing still holds the runtime, but without a size,
+    // so the typed parser would drop it and make it look gone.
+    fs::write(
+        fixture
+            .temp
+            .path()
+            .join(format!("after-delete-{}.json", SimctlFixture::IOS_RUNTIME)),
+        runtimes.replace("\"sizeBytes\":8000000000,", ""),
+    )
+    .unwrap();
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+        "--include-recent",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let deferred = report["deferred_paths"].as_array().unwrap();
+    assert!(
+        deferred
+            .iter()
+            .any(|path| path.as_str().unwrap().ends_with("ios.dmg")),
+        "{report}"
+    );
+    assert!(
+        report["apparent_bytes_removed"].as_u64().unwrap() < 8_000_000_000,
+        "the unconfirmed runtime is not counted as freed: {report}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_booted_device_without_a_data_path_still_blocks_its_runtime() {
+    let fixture = SimctlFixture::new();
+    fs::write(
+        fixture.temp.path().join("devices.json"),
+        r#"{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-2":[{"state":"Booted","name":"Hidden","udid":"7A1C3F10-0000-4000-8000-000000000009"}]}}"#,
+    )
+    .unwrap();
+    let out = fixture.run(&[
+        "scan",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-simulator-runtime",
+    ]);
+    let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let ios = scan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["label"].as_str().unwrap().starts_with("iOS"))
+        .unwrap();
+    assert_eq!(ios["cleanable"], false, "{scan}");
+}

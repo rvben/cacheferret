@@ -15,6 +15,7 @@ mod process;
 mod rustup;
 mod scanner;
 pub mod schema;
+mod simulator;
 
 pub use catalog::{catalog, default_roots};
 pub use cleaner::clean_candidates;

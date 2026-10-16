@@ -843,6 +843,12 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
                     String::new()
                 }
             );
+            if !report.deferred_paths.is_empty() {
+                summary.push_str(&format!(
+                    "; {} removal(s) accepted but not finished by the owning tool, their size is not counted as freed",
+                    report.deferred_paths.len()
+                ));
+            }
             if !report.dry_run {
                 match report.filesystem_deltas.as_slice() {
                     [delta] => summary.push_str(&format!(
@@ -951,7 +957,7 @@ const NATIVE_CLEAN_FIELDS: [&str; 11] = [
     "diagnostics",
 ];
 
-const CLEAN_FIELDS: [&str; 19] = [
+const CLEAN_FIELDS: [&str; 20] = [
     "changed",
     "dry_run",
     "confirmed",
@@ -970,6 +976,7 @@ const CLEAN_FIELDS: [&str; 19] = [
     "filesystem_deltas",
     "selected_targets",
     "cleaned_paths",
+    "deferred_paths",
     "skipped_paths",
 ];
 

@@ -1223,6 +1223,9 @@ fn cleanup_message(report: &CleanReport) -> String {
             format_bytes(report.allocated_bytes_removed_estimate)
         );
         append_observed_delta(&mut message, report);
+        if !report.deferred_paths.is_empty() {
+            message.push_str(" · removal not finished yet, size not counted");
+        }
         if report.skipped > 0 {
             message.push_str(&format!(" · {} skipped", report.skipped));
         }
@@ -1235,6 +1238,9 @@ fn cleanup_message(report: &CleanReport) -> String {
             format_bytes(report.allocated_bytes_removed_estimate)
         );
         append_observed_delta(&mut message, report);
+        if !report.deferred_paths.is_empty() {
+            message.push_str(" · removal not finished yet, size not counted");
+        }
         if report.skipped > 0 {
             message.push_str(&format!(" · {} skipped", report.skipped));
         }

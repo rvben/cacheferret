@@ -126,6 +126,7 @@ fn removable(home: &Path, env_toolchain: Option<&str>) -> Result<Vec<Planned>, S
                 label: Some(label(&name)),
                 path: entry.path(),
                 network_restore: true,
+                cleanable: true,
                 sizing: Sizing::Tree {
                     age: AgeSignal::FileUse,
                     minimum_bytes: 1,

@@ -295,6 +295,20 @@ pub fn catalog() -> Vec<CatalogEntry> {
             true
         ),
         entry!(
+            "xcode-simulator-device",
+            "xcode",
+            Global,
+            "Shut-down iOS, watchOS, tvOS and visionOS simulator devices holding at least 64 MiB, removed with simctl",
+            false
+        ),
+        entry!(
+            "xcode-simulator-runtime",
+            "xcode",
+            Global,
+            "Installed simulator runtimes that simctl reports as deletable and no booted device uses, removed with simctl",
+            true
+        ),
+        entry!(
             "cmake-build",
             "cpp",
             Project,
