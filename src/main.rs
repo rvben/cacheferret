@@ -641,7 +641,7 @@ fn prompt_for_confirmation(candidates: &[CacheCandidate]) -> Result<bool, Error>
                 "local"
             },
             candidate.kind,
-            candidate.path.display()
+            candidate.display_name()
         );
     }
     eprint!(
@@ -693,7 +693,7 @@ fn render_scan_text(
                 .map_or_else(|| "?".to_owned(), |days| format!("{days}d")),
             candidate.scope,
             candidate.kind,
-            candidate.path.display(),
+            candidate.display_name(),
             if candidate.protected {
                 " [protected]"
             } else {
@@ -890,7 +890,10 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
                         "local"
                     },
                     target.kind,
-                    target.path.display()
+                    target
+                        .label
+                        .as_ref()
+                        .map_or_else(|| target.path.display().to_string(), Clone::clone)
                 )
             }));
             lines.join("\n")
@@ -898,11 +901,12 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
     }
 }
 
-const CANDIDATE_FIELDS: [&str; 11] = [
+const CANDIDATE_FIELDS: [&str; 12] = [
     "kind",
     "ecosystem",
     "scope",
     "path",
+    "label",
     "bytes",
     "allocated_bytes",
     "modified_unix",

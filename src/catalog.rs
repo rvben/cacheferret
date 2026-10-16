@@ -288,6 +288,13 @@ pub fn catalog() -> Vec<CatalogEntry> {
             false
         ),
         entry!(
+            "rust-toolchain",
+            "rust",
+            Global,
+            "Installed rustup toolchains other than the default, overrides and RUSTUP_TOOLCHAIN, removed with rustup",
+            true
+        ),
+        entry!(
             "cmake-build",
             "cpp",
             Project,

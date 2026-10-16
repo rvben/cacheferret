@@ -769,3 +769,325 @@ fn device_support_entries_are_listed_and_removed_per_directory() {
     assert!(!keep.exists() && !remove.exists());
     assert!(support.exists(), "the platform folder itself is preserved");
 }
+
+/// A rustup home with a default toolchain and two removable ones, plus a fake
+/// `rustup` that answers `show home` and records and performs uninstalls.
+#[cfg(unix)]
+struct RustupFixture {
+    temp: TempDir,
+    home: std::path::PathBuf,
+    log: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl RustupFixture {
+    const DEFAULT: &'static str = "stable-aarch64-apple-darwin";
+    const OLD: &'static str = "1.70.0-aarch64-apple-darwin";
+    const NIGHTLY: &'static str = "nightly-2026-01-01-aarch64-apple-darwin";
+
+    /// `failing` names a toolchain whose uninstall is refused by the fake.
+    fn new(failing: Option<&str>) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("rustup-home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("settings.toml"),
+            format!(
+                "default_toolchain = \"{}\"\nprofile = \"default\"\nversion = \"12\"\n",
+                Self::DEFAULT
+            ),
+        )
+        .unwrap();
+        for name in [Self::DEFAULT, Self::OLD, Self::NIGHTLY] {
+            let bin = home.join("toolchains").join(name).join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join("rustc"), [3_u8; 256]).unwrap();
+        }
+        let rustup = temp.path().join("rustup");
+        let failing = failing.unwrap_or("none");
+        let uninstall = format!(
+            r#"if [ "$3" = "{failing}" ]; then echo "error: toolchain is in use" >&2; exit 1; fi; /bin/rm -rf "$CACHEFERRET_TEST_HOME/toolchains/$3""#
+        );
+        fs::write(
+            &rustup,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CACHEFERRET_TEST_LOG"
+case "$1 $2" in
+  "show home")
+    if [ -f "$CACHEFERRET_TEST_HOME/settings-later.toml" ] && [ "$(/usr/bin/grep -c '^show home$' "$CACHEFERRET_TEST_LOG")" -ge 2 ]; then
+      /bin/mv "$CACHEFERRET_TEST_HOME/settings-later.toml" "$CACHEFERRET_TEST_HOME/settings.toml"
+    fi
+    printf '%s\n' "$CACHEFERRET_TEST_HOME" ;;
+  "toolchain uninstall") {uninstall} ;;
+  *) echo "unexpected rustup invocation: $*" >&2; exit 42 ;;
+esac
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
+        let log = temp.path().join("argv");
+        Self { temp, home, log }
+    }
+
+    fn toolchain(&self, name: &str) -> std::path::PathBuf {
+        self.home.join("toolchains").join(name)
+    }
+
+    fn invocations(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        let out = Command::new(BIN)
+            .args(args)
+            .env("PATH", self.temp.path())
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .env("CACHEFERRET_TEST_HOME", &self.home)
+            .env("CACHEFERRET_TEST_LOG", &self.log)
+            .output()
+            .expect("spawn binary");
+        Output {
+            code: out.status.code().unwrap(),
+            stdout: String::from_utf8(out.stdout).unwrap(),
+            stderr: String::from_utf8(out.stderr).unwrap(),
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn rustup_toolchains_are_listed_per_toolchain_without_the_default() {
+    let fixture = RustupFixture::new(None);
+    let out = fixture.run(&["scan", "--scope", "global", "--kind", "rust-toolchain"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let mut items: Vec<(String, String)> = scan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            assert_eq!(item["ecosystem"], "rust");
+            assert_eq!(item["network_restore"], true);
+            assert_eq!(item["bytes"], 256);
+            (
+                item["label"].as_str().unwrap().to_owned(),
+                item["path"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    items.sort();
+    assert_eq!(
+        items,
+        [
+            (
+                "1.70.0".to_owned(),
+                fixture
+                    .toolchain(RustupFixture::OLD)
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            (
+                "nightly-2026-01-01".to_owned(),
+                fixture
+                    .toolchain(RustupFixture::NIGHTLY)
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn rustup_toolchain_selected_through_the_environment_is_not_listed() {
+    let fixture = RustupFixture::new(None);
+    let out = Command::new(BIN)
+        .args(["scan", "--scope", "global", "--kind", "rust-toolchain"])
+        .env("PATH", fixture.temp.path())
+        .env("RUSTUP_TOOLCHAIN", "1.70.0")
+        .env("CACHEFERRET_TEST_HOME", &fixture.home)
+        .env("CACHEFERRET_TEST_LOG", &fixture.log)
+        .output()
+        .unwrap();
+    let scan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let labels: Vec<&str> = scan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["nightly-2026-01-01"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_toolchain_selected_by_absolute_path_is_not_listed() {
+    let fixture = RustupFixture::new(None);
+    let out = Command::new(BIN)
+        .args(["scan", "--scope", "global", "--kind", "rust-toolchain"])
+        .env("PATH", fixture.temp.path())
+        .env(
+            "RUSTUP_TOOLCHAIN",
+            fixture.toolchain(RustupFixture::NIGHTLY),
+        )
+        .env("CACHEFERRET_TEST_HOME", &fixture.home)
+        .env("CACHEFERRET_TEST_LOG", &fixture.log)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let scan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let labels: Vec<&str> = scan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["1.70.0"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_toolchain_that_gets_selected_by_path_after_scanning_is_refused() {
+    let fixture = RustupFixture::new(None);
+    let later = format!(
+        "default_toolchain = \"{}\"\n[overrides]\n\"/Users/example/app\" = \"{}\"\n",
+        RustupFixture::DEFAULT,
+        fixture.toolchain(RustupFixture::NIGHTLY).display()
+    );
+    fs::write(fixture.home.join("settings-later.toml"), later).unwrap();
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "rust-toolchain",
+        "--protect-days",
+        "0",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 1);
+    assert_eq!(report["skipped"], 1);
+    assert!(fixture.toolchain(RustupFixture::NIGHTLY).exists());
+    assert!(!fixture.toolchain(RustupFixture::OLD).exists());
+    assert!(
+        !fixture
+            .invocations()
+            .iter()
+            .any(|line| line.ends_with(RustupFixture::NIGHTLY))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn rustup_toolchains_are_removed_with_rustup_and_never_by_deleting_files() {
+    let fixture = RustupFixture::new(None);
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "rust-toolchain",
+        "--protect-days",
+        "0",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 2);
+    assert_eq!(report["network_restore_selected"], 2);
+    assert!(!fixture.toolchain(RustupFixture::OLD).exists());
+    assert!(!fixture.toolchain(RustupFixture::NIGHTLY).exists());
+    assert!(fixture.toolchain(RustupFixture::DEFAULT).exists());
+
+    let mut uninstalls: Vec<String> = fixture
+        .invocations()
+        .into_iter()
+        .filter(|line| line.starts_with("toolchain uninstall"))
+        .collect();
+    uninstalls.sort();
+    assert_eq!(
+        uninstalls,
+        [
+            format!("toolchain uninstall {}", RustupFixture::OLD),
+            format!("toolchain uninstall {}", RustupFixture::NIGHTLY),
+        ]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_failed_rustup_uninstall_is_reported_and_leaves_the_toolchain() {
+    let fixture = RustupFixture::new(Some(RustupFixture::NIGHTLY));
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "rust-toolchain",
+        "--protect-days",
+        "0",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["cleaned"], 1);
+    assert_eq!(report["skipped"], 1);
+    let reason = report["skipped_paths"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("toolchain is in use"), "{reason}");
+    assert!(fixture.toolchain(RustupFixture::NIGHTLY).exists());
+    assert!(!fixture.toolchain(RustupFixture::OLD).exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn rustup_dry_run_never_uninstalls() {
+    let fixture = RustupFixture::new(None);
+    let out = fixture.run(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "rust-toolchain",
+        "--protect-days",
+        "0",
+        "--dry-run",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        fixture
+            .invocations()
+            .iter()
+            .all(|line| !line.starts_with("toolchain uninstall"))
+    );
+    assert!(fixture.toolchain(RustupFixture::OLD).exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn rustup_settings_that_are_not_understood_offer_nothing() {
+    let fixture = RustupFixture::new(None);
+    fs::write(
+        fixture.home.join("settings.toml"),
+        "default_toolchain = stable\n",
+    )
+    .unwrap();
+    let out = fixture.run(&["scan", "--scope", "global", "--kind", "rust-toolchain"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let scan: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(scan["items"].as_array().unwrap().len(), 0);
+    assert!(
+        scan["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("not understood"),
+        "{scan}"
+    );
+}

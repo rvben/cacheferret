@@ -11,7 +11,7 @@ use crate::catalog::{GlobalPath, global_paths, identify_project_cache};
 use crate::model::{FileIdentity, TreeFingerprint};
 use crate::{
     CacheCandidate, CacheScope, DiscoveredCache, DiscoveryEvent, DiscoveryOptions, Error,
-    ScanReport, catalog,
+    ScanReport, catalog, native,
 };
 
 #[derive(Debug, Clone)]
@@ -83,6 +83,11 @@ pub fn discover(options: &DiscoveryOptions) -> Result<ScanReport, Error> {
         .into_par_iter()
         .filter_map(|raw| measure_candidate(raw, options.protect_days, now))
         .collect();
+    if options.scope.includes(CacheScope::Global) {
+        let (native, native_warnings) = native::discover(&wants_kind, options.protect_days, now);
+        candidates.extend(native);
+        warnings.extend(native_warnings);
+    }
     candidates.sort_by(|left, right| {
         right
             .bytes
@@ -158,7 +163,18 @@ where
         token_tx.send(()).expect("token channel is open");
     }
 
+    let native_result = Mutex::new((Vec::new(), Vec::new()));
     rayon::scope(|scope| {
+        if options.scope.includes(CacheScope::Global) {
+            let (wants_kind, native_result, progress) = (&wants_kind, &native_result, &progress);
+            scope.spawn(move |_| {
+                let found =
+                    native::discover_with_progress(wants_kind, options.protect_days, now, progress);
+                *native_result
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = found;
+            });
+        }
         let mut dispatch = |raw: RawCandidate| {
             let key = raw.path.canonicalize().unwrap_or_else(|_| raw.path.clone());
             if !seen.insert(key) {
@@ -241,6 +257,11 @@ where
     let mut candidates = candidates
         .into_inner()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (native_candidates, native_warnings) = native_result
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    candidates.extend(native_candidates);
+    warnings.extend(native_warnings);
     sort_candidates(&mut candidates);
 
     Ok(ScanReport {
@@ -505,6 +526,7 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
         ecosystem: raw.ecosystem,
         scope: raw.scope,
         path: raw.path,
+        label: None,
         bytes: measurement.bytes,
         allocated_bytes: measurement.allocated_bytes,
         modified_unix,
@@ -518,14 +540,14 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
     })
 }
 
-struct TreeMeasurement {
-    bytes: u64,
-    allocated_bytes: u64,
-    modified_unix: Option<u64>,
-    fingerprint: TreeFingerprint,
+pub(crate) struct TreeMeasurement {
+    pub bytes: u64,
+    pub allocated_bytes: u64,
+    pub modified_unix: Option<u64>,
+    pub fingerprint: TreeFingerprint,
 }
 
-fn measure_tree(root: &Path) -> TreeMeasurement {
+pub(crate) fn measure_tree(root: &Path) -> TreeMeasurement {
     let mut bytes = 0_u64;
     let mut allocated_bytes = 0_u64;
     let mut entries = 0_u64;
@@ -596,11 +618,15 @@ pub fn refresh_candidate(
     candidate: &CacheCandidate,
     protect_days: u64,
 ) -> Result<CacheCandidate, Error> {
-    revalidate(candidate).map_err(|message| Error::Conflict { message })?;
-
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
+    if native::handles(&candidate.kind) {
+        return native::refresh(candidate, protect_days, now)
+            .map_err(|message| Error::Conflict { message });
+    }
+    revalidate(candidate).map_err(|message| Error::Conflict { message })?;
+
     let measurement = measure_tree(&candidate.path);
     let bytes = measurement.bytes;
     let modified_unix = measurement.modified_unix;
@@ -617,7 +643,7 @@ pub fn refresh_candidate(
 }
 
 #[cfg(unix)]
-fn identity(metadata: &fs::Metadata) -> FileIdentity {
+pub(crate) fn identity(metadata: &fs::Metadata) -> FileIdentity {
     use std::os::unix::fs::MetadataExt;
     FileIdentity {
         device: metadata.dev(),
@@ -626,7 +652,7 @@ fn identity(metadata: &fs::Metadata) -> FileIdentity {
 }
 
 #[cfg(not(unix))]
-fn identity(metadata: &fs::Metadata) -> FileIdentity {
+pub(crate) fn identity(metadata: &fs::Metadata) -> FileIdentity {
     FileIdentity {
         modified_unix: metadata
             .modified()
@@ -637,6 +663,9 @@ fn identity(metadata: &fs::Metadata) -> FileIdentity {
 }
 
 pub(crate) fn revalidate(candidate: &CacheCandidate) -> Result<(), String> {
+    if native::handles(&candidate.kind) {
+        return native::revalidate(candidate);
+    }
     let metadata = fs::symlink_metadata(&candidate.path)
         .map_err(|error| format!("cannot stat path: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -679,6 +708,11 @@ pub(crate) fn revalidate(candidate: &CacheCandidate) -> Result<(), String> {
 }
 
 pub(crate) fn revalidate_for_delete(candidate: &CacheCandidate) -> Result<(), String> {
+    if native::handles(&candidate.kind) {
+        // The native removal inspects the entry itself immediately before it
+        // acts, so a second inspection here would only widen the window.
+        return Ok(());
+    }
     revalidate(candidate)?;
     if requires_quiescent_tree(&candidate.kind) && temporary_tree_changed(candidate) {
         return Err("temporary storage changed after it was measured; scan again".to_owned());
@@ -1093,6 +1127,7 @@ mod tests {
             ecosystem: "macos".to_owned(),
             scope: CacheScope::Global,
             path: target.clone(),
+            label: None,
             bytes: measurement.bytes,
             allocated_bytes: measurement.allocated_bytes,
             modified_unix: measurement.modified_unix,

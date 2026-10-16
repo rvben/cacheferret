@@ -68,6 +68,9 @@ pub struct CacheCandidate {
     pub ecosystem: String,
     pub scope: CacheScope,
     pub path: PathBuf,
+    /// Human-readable name for entries whose path alone does not identify
+    /// them, such as a simulator device or runtime.
+    pub label: Option<String>,
     pub bytes: u64,
     /// Filesystem blocks attributed to this tree. Shared clone blocks may make
     /// this larger than the space a deletion can actually reclaim.
@@ -83,6 +86,15 @@ pub struct CacheCandidate {
     pub(crate) identity: FileIdentity,
     #[serde(skip)]
     pub(crate) tree_fingerprint: TreeFingerprint,
+}
+
+impl CacheCandidate {
+    /// The label when one exists, otherwise the path.
+    pub fn display_name(&self) -> String {
+        self.label
+            .clone()
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
 }
 
 /// Filesystem identity captured during discovery and checked again before removal.
@@ -264,6 +276,7 @@ pub struct CleanReport {
 pub struct CleanTarget {
     pub kind: String,
     pub path: PathBuf,
+    pub label: Option<String>,
     pub bytes: u64,
     pub allocated_bytes: u64,
     pub network_restore: bool,
@@ -274,6 +287,7 @@ impl From<&CacheCandidate> for CleanTarget {
         Self {
             kind: candidate.kind.clone(),
             path: candidate.path.clone(),
+            label: candidate.label.clone(),
             bytes: candidate.bytes,
             allocated_bytes: candidate.allocated_bytes,
             network_restore: candidate.network_restore,

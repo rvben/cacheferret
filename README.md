@@ -168,7 +168,7 @@ release covers:
 
 | ecosystem | project caches | shared caches |
 | --- | --- | --- |
-| Rust | Cargo `target/` | Cargo registry and git checkouts |
+| Rust | Cargo `target/` | Cargo registry and git checkouts, and each installed rustup toolchain that is not the default, an override or `RUSTUP_TOOLCHAIN` (removed with `rustup toolchain uninstall`) |
 | Python | virtualenvs, bytecode, pytest, mypy, Ruff, tox, nox | pip, uv, and pre-commit/prek |
 | JavaScript | `node_modules` | npm, pnpm, Bun, Deno, and Playwright |
 | Go | — | compiler and module caches |

@@ -388,6 +388,10 @@ impl App {
                     || candidate.kind.to_ascii_lowercase().contains(&query)
                     || candidate.ecosystem.to_ascii_lowercase().contains(&query)
                     || candidate
+                        .label
+                        .as_ref()
+                        .is_some_and(|label| label.to_ascii_lowercase().contains(&query))
+                    || candidate
                         .path
                         .to_string_lossy()
                         .to_ascii_lowercase()
@@ -1733,7 +1737,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
                 format_bytes(candidate.bytes)
             ))
             .style(Style::default().fg(palette.accent));
-            let path = Cell::from(candidate.path.display().to_string());
+            let path = Cell::from(candidate.display_name());
             let cells = if compact {
                 vec![
                     Cell::from(marker),
@@ -2197,7 +2201,7 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
         )
     };
     let mut lines = vec![Line::from(Span::styled(
-        candidate.path.display().to_string(),
+        candidate.display_name(),
         Style::default()
             .fg(palette.text)
             .add_modifier(Modifier::BOLD),
@@ -2619,7 +2623,7 @@ fn render_confirmation(frame: &mut Frame, area: Rect, app: &App) {
         (
             format!("Delete {}?", candidate.kind),
             truncate_middle(
-                &candidate.path.display().to_string(),
+                &candidate.display_name(),
                 modal.width.saturating_sub(6) as usize,
                 app.ui.unicode,
             ),
@@ -3027,6 +3031,17 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         app.handle_worker(WorkerMessage::ScanFinished(Ok(report)), &tx);
         (temp, target, app)
+    }
+
+    #[test]
+    fn the_filter_matches_the_label_shown_for_native_rows() {
+        let (_temp, _target, mut app) = project_app();
+        app.candidates[0].label = Some("iPhone 17 Pro (iOS 26.5)".to_owned());
+        for (query, expected) in [("iphone 17 pro", 1), ("IOS 26.5", 1), ("ipad", 0)] {
+            app.query = query.to_owned();
+            app.rebuild_visible();
+            assert_eq!(app.visible.len(), expected, "{query}");
+        }
     }
 
     fn two_project_app() -> (tempfile::TempDir, Vec<PathBuf>, App) {

@@ -130,6 +130,7 @@ pub fn contract() -> Value {
                             "fields": [
                                 {"name": "kind", "type": "string"},
                                 {"name": "path", "type": "string"},
+                                {"name": "label", "type": "string", "nullable": true},
                                 {"name": "bytes", "type": "integer"},
                                 {"name": "allocated_bytes", "type": "integer"},
                                 {"name": "network_restore", "type": "boolean"}
@@ -346,6 +347,7 @@ fn candidate_fields() -> Vec<Value> {
         json!({"name": "ecosystem", "type": "string"}),
         json!({"name": "scope", "type": "string", "enum": ["project", "global"]}),
         json!({"name": "path", "type": "string"}),
+        json!({"name": "label", "type": "string", "nullable": true, "description": "Human-readable name for entries whose path alone does not identify them, such as a simulator device or runtime."}),
         json!({"name": "bytes", "type": "integer"}),
         json!({"name": "allocated_bytes", "type": "integer"}),
         json!({"name": "modified_unix", "type": "integer", "nullable": true}),

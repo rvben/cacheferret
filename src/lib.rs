@@ -10,7 +10,9 @@ mod error;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 mod model;
+mod native;
 mod process;
+mod rustup;
 mod scanner;
 pub mod schema;
 

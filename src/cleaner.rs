@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::model::{FilesystemSpaceDelta, SkippedPath};
+use crate::native;
 use crate::scanner::revalidate_for_delete;
 use crate::{CacheCandidate, CleanReport};
 
@@ -109,7 +110,7 @@ where
             });
             continue;
         }
-        match remove_cache_directory(candidate) {
+        match remove_candidate(candidate) {
             Ok(()) => {
                 reclaimed = reclaimed.saturating_add(candidate.bytes);
                 allocated_removed = allocated_removed.saturating_add(candidate.allocated_bytes);
@@ -166,6 +167,16 @@ where
         selected_targets,
         cleaned_paths,
         skipped_paths,
+    }
+}
+
+/// Native kinds are removed by the tool that owns them; everything else is a
+/// directory that is deleted in place.
+fn remove_candidate(candidate: &CacheCandidate) -> io::Result<()> {
+    if native::handles(&candidate.kind) {
+        native::remove(candidate)
+    } else {
+        remove_cache_directory(candidate)
     }
 }
 
