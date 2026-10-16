@@ -281,6 +281,13 @@ pub fn catalog() -> Vec<CatalogEntry> {
             false
         ),
         entry!(
+            "xcode-device-support",
+            "xcode",
+            Global,
+            "Xcode iOS, watchOS, tvOS and visionOS DeviceSupport symbols, one per device and OS build",
+            false
+        ),
+        entry!(
             "cmake-build",
             "cpp",
             Project,
@@ -646,6 +653,9 @@ pub(crate) fn global_paths() -> Vec<GlobalPath> {
         }
 
         add_ruby_gem_caches(home, &mut paths);
+        if cfg!(target_os = "macos") {
+            add_xcode_device_support(home, &mut paths);
+        }
 
         #[cfg(target_os = "macos")]
         paths.extend(crate::macos::temporary_paths(home));
@@ -761,6 +771,39 @@ fn add_ruby_gem_caches(home: &Path, paths: &mut Vec<GlobalPath>) {
     }
 }
 
+/// Platform folders under which Xcode stores per-device symbol caches.
+const DEVICE_SUPPORT_FOLDERS: [&str; 4] = [
+    "iOS DeviceSupport",
+    "watchOS DeviceSupport",
+    "tvOS DeviceSupport",
+    "visionOS DeviceSupport",
+];
+
+/// Xcode re-extracts a device's symbols from the device the next time it is
+/// attached, so each `<device> <os> (<build>)` directory is its own cache.
+fn add_xcode_device_support(home: &Path, paths: &mut Vec<GlobalPath>) {
+    let xcode = home.join("Library/Developer/Xcode");
+    for folder in DEVICE_SUPPORT_FOLDERS {
+        let Ok(entries) = fs::read_dir(xcode.join(folder)) else {
+            continue;
+        };
+        let mut children: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                !entry.file_name().to_string_lossy().starts_with('.')
+                    && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            })
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        paths.extend(
+            children
+                .into_iter()
+                .map(|path| global(path, "xcode-device-support", "xcode", false)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,5 +862,58 @@ mod tests {
                 "{kind} requires a download to restore"
             );
         }
+    }
+
+    #[test]
+    fn device_support_lists_one_entry_per_real_device_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let xcode = home.path().join("Library/Developer/Xcode");
+        for dir in [
+            "iOS DeviceSupport/iPhone15,2 26.1 (23B85)",
+            "iOS DeviceSupport/iPhone15,2 26.2 (23C55)",
+            "watchOS DeviceSupport/Watch7,1 11.0 (22R350)",
+            "visionOS DeviceSupport/RealityDevice14,1 2.0 (22N5)",
+            "iOS DeviceSupport/.hidden",
+        ] {
+            fs::create_dir_all(xcode.join(dir)).unwrap();
+        }
+        fs::write(xcode.join("iOS DeviceSupport/.DS_Store"), "").unwrap();
+        fs::write(xcode.join("tvOS DeviceSupport"), "not a directory").unwrap();
+        #[cfg(unix)]
+        {
+            let elsewhere = home.path().join("elsewhere");
+            fs::create_dir_all(&elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, xcode.join("iOS DeviceSupport/linked")).unwrap();
+        }
+
+        let mut paths = Vec::new();
+        add_xcode_device_support(home.path(), &mut paths);
+
+        let names: Vec<String> = paths
+            .iter()
+            .map(|entry| {
+                entry
+                    .path
+                    .strip_prefix(&xcode)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "iOS DeviceSupport/iPhone15,2 26.1 (23B85)",
+                "iOS DeviceSupport/iPhone15,2 26.2 (23C55)",
+                "watchOS DeviceSupport/Watch7,1 11.0 (22R350)",
+                "visionOS DeviceSupport/RealityDevice14,1 2.0 (22N5)",
+            ]
+        );
+        assert!(paths.iter().all(|entry| {
+            entry.kind == "xcode-device-support"
+                && entry.ecosystem == "xcode"
+                && !entry.network_restore
+                && entry.cleanable
+        }));
     }
 }

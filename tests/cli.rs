@@ -712,3 +712,60 @@ fn invalid_kind_has_declared_error() {
     assert_eq!(out.code, 2);
     assert_eq!(error_envelope(&out.stderr)["kind"], "invalid_input");
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn device_support_entries_are_listed_and_removed_per_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let support = home
+        .path()
+        .join("Library/Developer/Xcode/iOS DeviceSupport");
+    let keep = support.join("iPhone15,2 26.1 (23B85)");
+    let remove = support.join("iPhone15,2 26.2 (23C55)");
+    for dir in [&keep, &remove] {
+        fs::create_dir_all(dir.join("Symbols")).unwrap();
+        fs::write(dir.join("Symbols/libsystem"), [1_u8; 128]).unwrap();
+    }
+    let home_arg = home.path().to_string_lossy().into_owned();
+    let run_home = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .env("HOME", &home_arg)
+            .env_remove("XDG_CACHE_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .expect("spawn binary");
+        (
+            out.status.code().unwrap(),
+            String::from_utf8(out.stdout).unwrap(),
+        )
+    };
+
+    let (code, stdout) = run_home(&[
+        "scan",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-device-support",
+    ]);
+    assert_eq!(code, 0);
+    let scan: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let items = scan["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|item| item["ecosystem"] == "xcode"));
+    assert!(items.iter().all(|item| item["network_restore"] == false));
+
+    let (code, stdout) = run_home(&[
+        "clean",
+        "--scope",
+        "global",
+        "--kind",
+        "xcode-device-support",
+        "--protect-days",
+        "0",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!keep.exists() && !remove.exists());
+    assert!(support.exists(), "the platform folder itself is preserved");
+}
