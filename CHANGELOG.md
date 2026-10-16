@@ -6,6 +6,18 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/rvben/cacheferret/compare/v0.5.2...v0.5.3) - 2026-10-16
+
+### Added
+
+- **xcode**: offer unused simulator devices and runtimes and remove them with simctl ([c896bc2](https://github.com/rvben/cacheferret/commit/c896bc2bfde5beaab819f2de300bd913e5b0fe0c))
+- **rust**: offer unused rustup toolchains and remove them with rustup ([4c58836](https://github.com/rvben/cacheferret/commit/4c58836eded8e2cc0fec7264d7db546435b21d74))
+- **catalog**: add Xcode DeviceSupport symbol caches ([57e8c49](https://github.com/rvben/cacheferret/commit/57e8c49e01af31b2cf18753527667654c5382fda))
+
+### Fixed
+
+- **docker**: trim the Colima data disk after a build-cache prune ([2ce066b](https://github.com/rvben/cacheferret/commit/2ce066b26ba863b4a39e810c5891b0016e6d4dcc))
+
 ## [0.5.2](https://github.com/rvben/cacheferret/compare/v0.5.1...v0.5.2) - 2026-08-31
 
 ### Added
