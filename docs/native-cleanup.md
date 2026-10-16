@@ -23,6 +23,16 @@ prune itself still counts as done. The byte count in the report
 include extents discarded earlier, so it is not a measure of host space regained. Docker Desktop, OrbStack and other runtimes
 get no trim.
 
+Rust toolchains and Xcode simulator devices and runtimes follow the same
+native pattern. These candidates carry no filesystem identity: each is
+resolved again through its owning tool immediately before removal, and the
+removal is refused when the tool no longer reports it as unused. Runtime
+deletion can complete asynchronously inside Xcode services, so the runtime
+list is queried again after the command. A runtime that is no longer listed
+counts as removed; one that is still listed, or whose state cannot be
+confirmed, is reported in `deferred_paths` and its size is not counted as
+freed. The observed free-space change is reported separately either way.
+
 That remains the right default for disposable build trees such as Cargo
 `target/`, `node_modules`, CMake build directories, and Python bytecode. The
 path is the unit the user inspected and selected. A project-level native clean
@@ -57,6 +67,9 @@ text output, and JSON schema.
 | pnpm | [`pnpm store status` and `pnpm store prune`](https://pnpm.io/cli/store) | Strong native-prune candidate because the content-addressed store owns package references. |
 | npm | [`npm cache verify`](https://docs.npmjs.com/cli/v11/commands/npm-cache) | Prefer verification/advice. npm describes its cache as self-healing, and force-cleaning the entire cache is rarely a useful default. |
 | NuGet | [`dotnet nuget locals`](https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-locals) | Native clear is viable, but its named resource classes must be shown separately instead of collapsing `all` into one opaque target. |
+| rustup | `rustup toolchain list -v`, `rustup show home`, `rustup toolchain uninstall` | Implemented. Each installed toolchain is a candidate unless it is the default, a directory override, or `RUSTUP_TOOLCHAIN`, whether selected by name or by absolute directory path (compared by canonical path). The in-use set is read from `settings.toml`, and when that file is missing or not understood, or a selection is neither a name nor an absolute path, no toolchain is offered and a warning says so. Symlinked (linked) toolchains are skipped. |
+| Xcode simulator devices | `xcrun simctl list devices --json`, `xcrun simctl delete <udid>` | Implemented. Size is the device directory. Only devices with at least one installed app (a non-empty `data/Containers/Bundle/Application`) are listed, since a pristine device only removes an Xcode destination. Age is the newest modification time of a regular file under `data/`; directory times are ignored because CoreSimulator rewrites them, and a device with no files has an unknown age. Only `Shutdown` devices are cleanable, re-queried right before deletion. |
+| Xcode simulator runtimes | `xcrun simctl runtime list -j`, `xcrun simctl runtime delete <id>` | Implemented. Size is the `sizeBytes` simctl reports and age is `lastUsedAt` (unknown when absent). Only runtimes marked `deletable` are cleanable, and a runtime is refused while any non-shut-down device uses it. Restoring one means a download. |
 | Cargo project output | [`cargo clean`](https://doc.rust-lang.org/cargo/commands/cargo-clean.html) | Keep exact-path deletion by default. Cargo can resolve workspace and configured target directories beyond the focused candidate. |
 
 Other ecosystems should be added only after the same boundary analysis. The

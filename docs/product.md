@@ -180,6 +180,11 @@ In scope:
 - Safe preview and cleanup for scripts.
 - Docker storage inspection plus guarded ordinary build-cache pruning in the
   TUI, text output, and JSON.
+- Tool-owned cleanup through the owning tool, never through file deletion:
+  unused rustup toolchains (`rustup toolchain uninstall`), shut-down Xcode
+  simulator devices (`xcrun simctl delete`), and deletable Xcode simulator
+  runtimes (`xcrun simctl runtime delete`). Each is re-inspected immediately
+  before removal and refused when it is in use.
 - Human-readable terminal output and clispec.dev v0.3 JSON behavior.
 - macOS and Linux on x86_64 and aarch64.
 
@@ -284,7 +289,7 @@ successful build.
 - Continue polishing navigation, focus continuity, responsive terminal
   layouts, copy, and visual identity based on real terminal use.
 - Evaluate whether any additional native cleanup class can be bounded as
-  precisely as Docker's ordinary build cache; keep images, containers, and
+  precisely as Docker's ordinary build cache or the rustup and simulator kinds; keep images, containers, and
   volumes inspection-only until that evidence exists.
 - Consider Windows only as a complete platform effort, not merely another
   wheel target.

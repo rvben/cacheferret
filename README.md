@@ -176,7 +176,7 @@ release covers:
 | .NET | `bin/`, `obj/` | NuGet packages |
 | Ruby/PHP | Bundler and Composer dependencies | RubyGems and Composer caches |
 | Swift | SwiftPM `.build/` | SwiftPM caches and Xcode DerivedData |
-| Xcode | — | iOS, watchOS, tvOS, and visionOS DeviceSupport symbols, one entry per device and OS build |
+| Xcode | — | iOS, watchOS, tvOS, and visionOS DeviceSupport symbols, one entry per device and OS build; shut-down simulator devices that have installed apps (removed with `xcrun simctl delete`); simulator runtimes that `simctl` reports as deletable and no booted device uses (removed with `xcrun simctl runtime delete`) |
 | C/C++ | verified CMake build trees | ccache |
 | Zig/Dart/Elixir | project build and dependency state | Zig, pub, and Hex caches |
 | Haskell | Stack and Cabal project output | Stack and Cabal stores |
