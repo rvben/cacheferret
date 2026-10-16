@@ -156,7 +156,20 @@ pub struct NativeCleanReport {
     pub after: Option<NativeResource>,
     pub reported_reclaimed_bytes: Option<u64>,
     pub estimated_removed_bytes: u64,
+    /// Host-side space return performed after the prune, when the Docker
+    /// daemon runs inside a VM that does not release freed blocks by itself.
+    pub trim: Option<NativeTrim>,
     pub diagnostics: Vec<NativeDiagnostic>,
+}
+
+/// A filesystem trim run in a VM so prune-freed blocks can be released to the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativeTrim {
+    pub method: String,
+    pub profile: String,
+    /// Bytes `fstrim -v` reports as submitted for discard. This can include
+    /// extents discarded earlier, so it is not the space the host regained.
+    pub trim_reported_bytes: Option<u64>,
 }
 
 impl NativeCleanReport {
@@ -171,6 +184,7 @@ impl NativeCleanReport {
             after: None,
             reported_reclaimed_bytes: None,
             estimated_removed_bytes: 0,
+            trim: None,
             diagnostics: Vec::new(),
         }
     }

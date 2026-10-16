@@ -75,6 +75,7 @@ fn run_docker_clean(args: &[&str], temp: &TempDir, state: &Path, log: &Path) -> 
     let out = Command::new(BIN)
         .args(args)
         .env("PATH", temp.path())
+        .env_remove("DOCKER_HOST")
         .env("CACHEFERRET_TEST_STATE", state)
         .env("CACHEFERRET_TEST_LOG", log)
         .output()
@@ -345,6 +346,282 @@ fn docker_clean_yes_executes_only_bounded_build_cache_prune() {
     assert_eq!(value["changed"], true);
     assert_eq!(value["reported_reclaimed_bytes"], 750_000_000_u64);
     assert_eq!(value["after"]["reclaimable_bytes"], 0);
+}
+
+/// A fixture where the Docker CLI reports `$CACHEFERRET_TEST_ENDPOINT` as the
+/// active context endpoint and a fake `colima` records its argv.
+#[cfg(unix)]
+fn colima_fixture() -> (
+    TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let (temp, state, log) = docker_clean_fixture();
+    let docker = temp.path().join("docker");
+    let script = fs::read_to_string(&docker).unwrap().replace(
+        "  *)\n",
+        "  \"context inspect\")\n    printf '[{\"Endpoints\":{\"docker\":{\"Host\":\"%s\"}}}]\\n' \"$CACHEFERRET_TEST_ENDPOINT\"\n    ;;\n  *)\n",
+    );
+    fs::write(&docker, script).unwrap();
+    let colima_log = temp.path().join("colima-argv");
+    let colima = temp.path().join("colima");
+    fs::write(
+        &colima,
+        r#"#!/bin/sh
+if [ ! -f "$CACHEFERRET_TEST_STATE" ]; then
+  printf '%s\n' "trim ran before the prune" >&2
+  exit 9
+fi
+printf '%s\n' "$*" > "$CACHEFERRET_TEST_COLIMA_LOG"
+if [ -n "$CACHEFERRET_TEST_TRIM_FAILS" ]; then
+  printf '%s\n' "sudo: a password is required" >&2
+  exit 1
+fi
+printf '%s\n' "${CACHEFERRET_TEST_TRIM_OUTPUT:-/var/lib/docker: 700 MiB (734003200 bytes) trimmed on /dev/vdb}"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&colima, fs::Permissions::from_mode(0o755)).unwrap();
+    (temp, state, log, colima_log)
+}
+
+#[cfg(unix)]
+fn run_colima_clean(
+    temp: &TempDir,
+    state: &Path,
+    log: &Path,
+    colima_log: &Path,
+    envs: &[(&str, &str)],
+) -> serde_json::Value {
+    let mut command = Command::new(BIN);
+    command
+        .args(["docker", "clean", "--yes"])
+        .env("PATH", temp.path())
+        .env_remove("DOCKER_HOST")
+        .env("CACHEFERRET_TEST_STATE", state)
+        .env("CACHEFERRET_TEST_LOG", log)
+        .env("CACHEFERRET_TEST_COLIMA_LOG", colima_log);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let out = command.output().expect("spawn binary");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_trims_the_colima_disk_after_the_prune() {
+    let (temp, state, log, colima_log) = colima_fixture();
+    let value = run_colima_clean(
+        &temp,
+        &state,
+        &log,
+        &colima_log,
+        &[(
+            "CACHEFERRET_TEST_ENDPOINT",
+            "unix:///Users/example/.colima/default/docker.sock",
+        )],
+    );
+
+    assert_eq!(
+        fs::read_to_string(&colima_log).unwrap().trim(),
+        "ssh --profile default -- sudo fstrim -v /var/lib/docker"
+    );
+    assert_eq!(value["changed"], true);
+    assert_eq!(value["trim"]["method"], "colima-fstrim");
+    assert_eq!(value["trim"]["profile"], "default");
+    assert_eq!(value["trim"]["trim_reported_bytes"], 734_003_200_u64);
+    assert_eq!(value["diagnostics"].as_array().unwrap().len(), 0);
+}
+
+/// The human-readable lines a Colima prune prints about the trim.
+#[cfg(unix)]
+fn trim_text_lines(trim_output: &str) -> Vec<String> {
+    let (temp, state, log, colima_log) = colima_fixture();
+    let out = Command::new(BIN)
+        .args(["--output", "text", "docker", "clean", "--yes"])
+        .env("PATH", temp.path())
+        .env_remove("DOCKER_HOST")
+        .env("CACHEFERRET_TEST_STATE", &state)
+        .env("CACHEFERRET_TEST_LOG", &log)
+        .env("CACHEFERRET_TEST_COLIMA_LOG", &colima_log)
+        .env("CACHEFERRET_TEST_TRIM_OUTPUT", trim_output)
+        .env(
+            "CACHEFERRET_TEST_ENDPOINT",
+            "unix:///Users/example/.colima/default/docker.sock",
+        )
+        .output()
+        .expect("spawn binary");
+    assert_eq!(out.status.code(), Some(0));
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("fstrim"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+#[cfg(unix)]
+fn the_text_output_labels_the_fstrim_count_as_reported_not_reclaimed() {
+    let lines = trim_text_lines("/var/lib/docker: 700 MiB (734003200 bytes) trimmed on /dev/vdb");
+    assert_eq!(
+        lines,
+        [
+            "fstrim reported 700.0 MiB trimmed (Colima profile default); not a measure of space returned to the host"
+        ]
+    );
+    assert!(!lines[0].contains("reclaimed") && !lines[0].contains("Returned"));
+}
+
+#[test]
+#[cfg(unix)]
+fn the_text_output_without_an_fstrim_count_claims_no_amount() {
+    let lines = trim_text_lines("trim finished");
+    assert_eq!(
+        lines,
+        ["Ran fstrim to return freed space to the host (Colima profile default)"]
+    );
+    assert!(!lines[0].contains("reclaimed") && !lines[0].contains("freed 0"));
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_trims_the_named_colima_profile_from_docker_host() {
+    let (temp, state, log, colima_log) = colima_fixture();
+    let value = run_colima_clean(
+        &temp,
+        &state,
+        &log,
+        &colima_log,
+        &[
+            (
+                "DOCKER_HOST",
+                "unix:///Users/example/.colima/work/docker.sock",
+            ),
+            ("CACHEFERRET_TEST_ENDPOINT", "unix:///var/run/docker.sock"),
+        ],
+    );
+
+    assert_eq!(
+        fs::read_to_string(&colima_log).unwrap().trim(),
+        "ssh --profile work -- sudo fstrim -v /var/lib/docker"
+    );
+    assert_eq!(value["trim"]["profile"], "work");
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_host_decides_over_a_colima_docker_context() {
+    // Docker gives DOCKER_HOST precedence over DOCKER_CONTEXT, so a Colima
+    // context selected alongside a non-Colima DOCKER_HOST must not be trimmed.
+    let (temp, state, log, colima_log) = colima_fixture();
+    let value = run_colima_clean(
+        &temp,
+        &state,
+        &log,
+        &colima_log,
+        &[
+            (
+                "DOCKER_HOST",
+                "unix:///Users/example/.orbstack/run/docker.sock",
+            ),
+            ("DOCKER_CONTEXT", "colima"),
+            (
+                "CACHEFERRET_TEST_ENDPOINT",
+                "unix:///Users/example/.colima/default/docker.sock",
+            ),
+        ],
+    );
+
+    assert!(!colima_log.exists());
+    assert!(value["trim"].is_null(), "{value}");
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_does_not_trim_other_docker_runtimes() {
+    for endpoint in [
+        "unix:///Users/example/.orbstack/run/docker.sock",
+        "unix:///Users/example/.docker/run/docker.sock",
+        "unix:///var/run/docker.sock",
+    ] {
+        let (temp, state, log, colima_log) = colima_fixture();
+        let value = run_colima_clean(
+            &temp,
+            &state,
+            &log,
+            &colima_log,
+            &[("CACHEFERRET_TEST_ENDPOINT", endpoint)],
+        );
+
+        assert!(!colima_log.exists(), "{endpoint}");
+        assert_eq!(value["changed"], true);
+        assert!(value["trim"].is_null());
+        assert_eq!(value["diagnostics"].as_array().unwrap().len(), 0);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_reports_a_failed_trim_as_a_warning_not_a_failure() {
+    let (temp, state, log, colima_log) = colima_fixture();
+    let value = run_colima_clean(
+        &temp,
+        &state,
+        &log,
+        &colima_log,
+        &[
+            (
+                "CACHEFERRET_TEST_ENDPOINT",
+                "unix:///Users/example/.colima/default/docker.sock",
+            ),
+            ("CACHEFERRET_TEST_TRIM_FAILS", "1"),
+        ],
+    );
+
+    assert_eq!(value["changed"], true);
+    assert_eq!(value["reported_reclaimed_bytes"], 750_000_000_u64);
+    assert!(value["trim"].is_null());
+    let diagnostic = &value["diagnostics"][0];
+    assert_eq!(diagnostic["provider"], "colima");
+    assert_eq!(diagnostic["kind"], "trim_failed");
+    assert!(
+        diagnostic["message"]
+            .as_str()
+            .unwrap()
+            .contains("password is required")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_clean_dry_run_never_trims() {
+    let (temp, state, log, colima_log) = colima_fixture();
+    let out = Command::new(BIN)
+        .args(["docker", "clean", "--dry-run"])
+        .env("PATH", temp.path())
+        .env(
+            "DOCKER_HOST",
+            "unix:///Users/example/.colima/default/docker.sock",
+        )
+        .env("CACHEFERRET_TEST_STATE", &state)
+        .env("CACHEFERRET_TEST_LOG", &log)
+        .env("CACHEFERRET_TEST_COLIMA_LOG", &colima_log)
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!colima_log.exists());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(value["trim"].is_null());
 }
 
 #[test]

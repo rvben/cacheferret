@@ -4,11 +4,13 @@
 
 mod catalog;
 mod cleaner;
+mod colima;
 mod docker;
 mod error;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 mod model;
+mod process;
 mod scanner;
 pub mod schema;
 
@@ -19,7 +21,7 @@ pub use error::Error;
 pub use model::{
     CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveredCache,
     DiscoveryEvent, DiscoveryOptions, FilesystemSpaceDelta, NativeCleanReport, NativeDiagnostic,
-    NativeReport, NativeResource, OutputFormat, ScanReport, ScopeFilter,
+    NativeReport, NativeResource, NativeTrim, OutputFormat, ScanReport, ScopeFilter,
 };
 pub use scanner::{
     discover, discover_with_progress, discover_with_progress_prioritized, refresh_candidate,

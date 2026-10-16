@@ -781,6 +781,19 @@ fn render_docker_clean(
                         .to_owned(),
                 ]
             };
+            if let Some(trim) = &report.trim {
+                lines.push(match trim.trim_reported_bytes {
+                    Some(bytes) => format!(
+                        "fstrim reported {} trimmed (Colima profile {}); not a measure of space returned to the host",
+                        format_bytes(bytes),
+                        trim.profile
+                    ),
+                    None => format!(
+                        "Ran fstrim to return freed space to the host (Colima profile {})",
+                        trim.profile
+                    ),
+                });
+            }
             lines.extend(
                 report
                     .diagnostics
@@ -920,7 +933,7 @@ const NATIVE_RESOURCE_FIELDS: [&str; 9] = [
     "scope",
 ];
 
-const NATIVE_CLEAN_FIELDS: [&str; 10] = [
+const NATIVE_CLEAN_FIELDS: [&str; 11] = [
     "provider",
     "kind",
     "changed",
@@ -930,6 +943,7 @@ const NATIVE_CLEAN_FIELDS: [&str; 10] = [
     "after",
     "reported_reclaimed_bytes",
     "estimated_removed_bytes",
+    "trim",
     "diagnostics",
 ];
 

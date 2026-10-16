@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::colima;
 use crate::{NativeCleanReport, NativeDiagnostic, NativeReport, NativeResource};
 
 const PROVIDER: &str = "docker";
@@ -141,6 +142,14 @@ pub fn prune_docker_build_cache() -> Result<NativeCleanReport, NativeDiagnostic>
     let reported_reclaimed_bytes =
         parse_reclaimed_bytes(&output.stdout).or_else(|| parse_reclaimed_bytes(&output.stderr));
     let mut diagnostics = Vec::new();
+    let trim = match colima::trim_after_prune() {
+        Some(Ok(trim)) => Some(trim),
+        Some(Err(diagnostic)) => {
+            diagnostics.push(diagnostic);
+            None
+        }
+        None => None,
+    };
     let after = match preview_docker_build_cache() {
         Ok(resource) => Some(resource),
         Err(diagnostic) => {
@@ -164,6 +173,7 @@ pub fn prune_docker_build_cache() -> Result<NativeCleanReport, NativeDiagnostic>
         after,
         reported_reclaimed_bytes,
         estimated_removed_bytes,
+        trim,
         diagnostics,
     })
 }

@@ -12,6 +12,17 @@ the ordinary build-cache estimate, always requires confirmation unless `--yes`
 is explicit, revalidates again, and invokes only `docker builder prune --force`.
 It never uses `--all` or any system-, image-, container-, or volume-prune action.
 
+When the active Docker endpoint (`$DOCKER_HOST`, else `docker context inspect`)
+is a Colima socket (`.../.colima/<profile>/docker.sock`), a successful prune is
+followed by `colima ssh --profile <profile> -- sudo fstrim -v /var/lib/docker`.
+Colima mounts the Docker data disk without discard, so without the trim the
+space freed inside the VM is not returned to the host disk. The trim is bounded
+by a timeout and its failure is reported as a `trim_failed` diagnostic while the
+prune itself still counts as done. The byte count in the report
+(`trim_reported_bytes`) is what `fstrim -v` says it submitted for discard; it can
+include extents discarded earlier, so it is not a measure of host space regained. Docker Desktop, OrbStack and other runtimes
+get no trim.
+
 That remains the right default for disposable build trees such as Cargo
 `target/`, `node_modules`, CMake build directories, and Python bytecode. The
 path is the unit the user inspected and selected. A project-level native clean

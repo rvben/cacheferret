@@ -313,6 +313,11 @@ fn native_clean_fields() -> Vec<Value> {
         json!({"name": "after", "type": "object", "nullable": true, "fields": native_resource_fields()}),
         json!({"name": "reported_reclaimed_bytes", "type": "integer", "nullable": true}),
         json!({"name": "estimated_removed_bytes", "type": "integer"}),
+        json!({"name": "trim", "type": "object", "nullable": true, "description": "Filesystem trim run after the prune when the active Docker endpoint is a Colima VM, whose data disk does not release freed blocks on its own. The byte count is what fstrim reports as submitted for discard, which can include extents discarded before, so it is not host space reclaimed. Null when no trim applies or it failed (see diagnostics).", "fields": [
+            {"name": "method", "type": "string", "enum": ["colima-fstrim"]},
+            {"name": "profile", "type": "string"},
+            {"name": "trim_reported_bytes", "type": "integer", "nullable": true}
+        ]}),
         json!({"name": "diagnostics", "type": "array", "items": {"type": "object", "fields": [
             {"name": "provider", "type": "string"},
             {"name": "kind", "type": "string"},
