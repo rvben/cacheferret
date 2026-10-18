@@ -452,7 +452,7 @@ fn docker_clean_trims_the_colima_disk_after_the_prune() {
 
     assert_eq!(
         fs::read_to_string(&colima_log).unwrap().trim(),
-        "ssh --profile default -- sudo fstrim -v /var/lib/docker"
+        "ssh --profile default -- sudo sh -c sync && fstrim -v /var/lib/docker"
     );
     assert_eq!(value["changed"], true);
     assert_eq!(value["trim"]["method"], "colima-fstrim");
@@ -532,7 +532,7 @@ fn docker_clean_trims_the_named_colima_profile_from_docker_host() {
 
     assert_eq!(
         fs::read_to_string(&colima_log).unwrap().trim(),
-        "ssh --profile work -- sudo fstrim -v /var/lib/docker"
+        "ssh --profile work -- sudo sh -c sync && fstrim -v /var/lib/docker"
     );
     assert_eq!(value["trim"]["profile"], "work");
 }

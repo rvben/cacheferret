@@ -89,6 +89,10 @@ fn valid_profile(profile: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
+/// The trim is preceded by a sync: ext4 cannot discard blocks freed in a
+/// journal transaction that has not committed yet (up to 5 seconds after the
+/// prune), so a bare `fstrim` run straight after the prune trims nothing and
+/// still exits 0.
 fn trim(profile: &str) -> Result<NativeTrim, NativeDiagnostic> {
     let output = process::run(
         "colima",
@@ -98,9 +102,9 @@ fn trim(profile: &str) -> Result<NativeTrim, NativeDiagnostic> {
             profile,
             "--",
             "sudo",
-            "fstrim",
-            "-v",
-            DOCKER_DATA_DIR,
+            "sh",
+            "-c",
+            &format!("sync && fstrim -v {DOCKER_DATA_DIR}"),
         ],
         TRIM_TIMEOUT,
     )
