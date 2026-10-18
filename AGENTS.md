@@ -58,7 +58,7 @@ be selectable or deletable.
 
 ## Current release state
 
-- Current version: `0.5.4`.
+- Current version: `0.5.5`.
 - Published to crates.io: <https://crates.io/crates/cacheferret>
 - Published to PyPI: <https://pypi.org/project/cacheferret/>
 - PyPI provides native x86_64/aarch64 wheels for macOS and manylinux2014 Linux,

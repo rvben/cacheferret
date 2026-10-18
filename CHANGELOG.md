@@ -6,6 +6,12 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.5](https://github.com/rvben/cacheferret/compare/v0.5.4...v0.5.5) - 2026-10-18
+
+### Fixed
+
+- **docker**: sync before trimming the Colima data disk ([afa9905](https://github.com/rvben/cacheferret/commit/afa9905d3eab683acf6598e1bd5a2eca2cfdc8cf))
+
 ## [0.5.4](https://github.com/rvben/cacheferret/compare/v0.5.3...v0.5.4) - 2026-10-16
 
 ### Added
