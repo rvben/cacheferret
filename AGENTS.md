@@ -51,8 +51,9 @@ be selectable or deletable.
    field selection, stdout/stderr separation, or non-interactive confirmation.
 7. Be precise about what is rebuildable. Maven's local repository and the
    shared renv cache are scan-only. Docker storage uses native inspection;
-   ordinary build cache alone has guarded native pruning, while images,
-   containers, volumes, and broader build records remain inspection-only.
+   ordinary build cache has guarded native pruning, unused tagged images have
+   guarded per-image removal from the CLI, while untagged images, containers,
+   volumes, and broader build records remain inspection-only.
 8. Avoid repeating the same state label within one region. During scanning the
    header should have one status label; supporting detail belongs in the body.
 

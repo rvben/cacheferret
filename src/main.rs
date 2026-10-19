@@ -11,7 +11,8 @@ use cacheferret::{
     CacheCandidate, CleanReport, DiscoveryOptions, Error, NativeCleanReport, NativeDiagnostic,
     NativeReport, NativeResource, OutputFormat, ScopeFilter, clean_candidates, default_roots,
     discover, format_bytes, format_signed_bytes, inspect_docker, preview_docker_build_cache,
-    prune_docker_build_cache, schema,
+    preview_unused_docker_images, prune_docker_build_cache, remove_unused_docker_images, schema,
+    unique_image_bytes,
 };
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -139,7 +140,8 @@ struct DockerArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 enum DockerCommand {
-    /// Prune ordinary Docker build cache after a fresh preview and confirmation.
+    /// Prune ordinary Docker build cache, or with --unused-images remove tagged
+    /// images no container uses, after a fresh preview and confirmation.
     Clean(DockerCleanArgs),
 }
 
@@ -160,11 +162,17 @@ struct DockerInspectionArgs {
 
 #[derive(Debug, Clone, Args)]
 struct DockerCleanArgs {
-    /// Preview the build-cache prune without changing Docker state.
+    /// Remove tagged images that no container, running or stopped, uses,
+    /// instead of pruning the build cache. They must be downloaded or rebuilt
+    /// again before use.
+    #[arg(long)]
+    unused_images: bool,
+
+    /// Preview the cleanup without changing Docker state.
     #[arg(long)]
     dry_run: bool,
 
-    /// Confirm the build-cache prune non-interactively.
+    /// Confirm the cleanup non-interactively.
     #[arg(long, short = 'y')]
     yes: bool,
 
@@ -349,6 +357,9 @@ fn run_docker(args: DockerInspectionArgs, format: OutputFormat) -> Result<String
 
 fn run_docker_clean(args: DockerCleanArgs, format: OutputFormat) -> Result<String, Error> {
     validate_field_set(&args.fields, &NATIVE_CLEAN_FIELDS)?;
+    if args.unused_images {
+        return run_docker_image_clean(args, format);
+    }
     let before = preview_docker_build_cache().map_err(native_error)?;
     let report = if args.dry_run {
         NativeCleanReport::preview(before, true, false)
@@ -374,6 +385,60 @@ fn run_docker_clean(args: DockerCleanArgs, format: OutputFormat) -> Result<Strin
     Ok(render_docker_clean(&report, format, &args.fields))
 }
 
+fn run_docker_image_clean(args: DockerCleanArgs, format: OutputFormat) -> Result<String, Error> {
+    let unused = preview_unused_docker_images().map_err(native_error)?;
+    let report = if args.dry_run {
+        NativeCleanReport::images_preview(unused, true, false)
+    } else if unused.images.is_empty() {
+        NativeCleanReport::images_preview(unused, false, true)
+    } else {
+        let confirmed = if args.yes {
+            true
+        } else if !std::io::stdin().is_terminal() {
+            return Err(Error::NativeConfirmationRequired {
+                provider: "Docker".to_owned(),
+                kind: "unused images".to_owned(),
+            });
+        } else {
+            let mut question = image_plan_lines(&unused.images, "Remove");
+            question.push(
+                "Containers and volumes are not touched. Remove these images? [y/N] ".to_owned(),
+            );
+            ask(&question.join("\n"))?
+        };
+        if confirmed {
+            remove_unused_docker_images(&unused.images).map_err(native_error)?
+        } else {
+            NativeCleanReport::images_preview(unused, false, false)
+        }
+    };
+    Ok(render_docker_clean(&report, format, &args.fields))
+}
+
+/// A heading with the count and the space freed at least, one line per image,
+/// and the cost of getting them back.
+fn image_plan_lines(images: &[cacheferret::DockerImage], verb: &str) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{verb} {} unused Docker image{} · at least {} freed",
+        images.len(),
+        if images.len() == 1 { "" } else { "s" },
+        format_bytes(unique_image_bytes(images))
+    )];
+    lines.extend(images.iter().map(|image| {
+        format!(
+            "  {:>10}  {}{}",
+            format_bytes(image.unique_bytes),
+            image.reference,
+            image
+                .created
+                .as_ref()
+                .map_or(String::new(), |created| format!("  (created {created})"))
+        )
+    }));
+    lines.push("Each image must be downloaded or rebuilt again before it can be used.".to_owned());
+    lines
+}
+
 fn native_error(diagnostic: NativeDiagnostic) -> Error {
     if matches!(
         diagnostic.kind.as_str(),
@@ -392,11 +457,16 @@ fn native_error(diagnostic: NativeDiagnostic) -> Error {
 }
 
 fn prompt_for_docker_confirmation(resource: &NativeResource) -> Result<bool, Error> {
-    eprint!(
+    ask(&format!(
         "Prune Docker build cache ({} reclaimable of {} used)? Rebuilding may require downloads. [y/N] ",
         format_bytes(resource.reclaimable_bytes),
         format_bytes(resource.bytes)
-    );
+    ))
+}
+
+/// Ask on stderr and read a yes or no from stdin; anything but yes declines.
+fn ask(question: &str) -> Result<bool, Error> {
+    eprint!("{question}");
     std::io::stderr().flush().map_err(|source| Error::Io {
         path: PathBuf::from("<stderr>"),
         source,
@@ -694,10 +764,10 @@ fn render_scan_text(
             candidate.scope,
             candidate.kind,
             candidate.display_name(),
-            if candidate.protected {
-                " [protected]"
-            } else {
-                ""
+            match (&candidate.protection_note, candidate.protected) {
+                (_, true) => " [protected]".to_owned(),
+                (Some(note), false) => format!(" [{note}]"),
+                (None, false) => String::new(),
             }
         )
     }));
@@ -755,7 +825,9 @@ fn render_docker_clean(
             project_object(value, fields).to_string()
         }
         OutputFormat::Text => {
-            let mut lines = if report.dry_run {
+            let mut lines = if report.kind == "docker-images" {
+                image_clean_lines(report)
+            } else if report.dry_run {
                 vec![format!(
                     "Would prune Docker build cache · {} reclaimable of {} used · rebuilding may require downloads",
                     format_bytes(report.before.reclaimable_bytes),
@@ -803,6 +875,39 @@ fn render_docker_clean(
             lines.join("\n")
         }
     }
+}
+
+fn image_clean_lines(report: &NativeCleanReport) -> Vec<String> {
+    if report.dry_run {
+        let mut lines = image_plan_lines(&report.images, "Would remove");
+        lines.push("Containers and volumes are not touched.".to_owned());
+        return lines;
+    }
+    if report.images.is_empty() {
+        return vec!["No unused tagged Docker images; nothing changed".to_owned()];
+    }
+    if !report.confirmed {
+        return vec!["Docker image removal cancelled; nothing changed".to_owned()];
+    }
+    let mut lines = vec![format!(
+        "Removed {} of {} unused Docker images · {} estimated removed",
+        report.removed_images.len(),
+        report.images.len(),
+        format_bytes(report.estimated_removed_bytes)
+    )];
+    lines.extend(
+        report
+            .removed_images
+            .iter()
+            .map(|reference| format!("Removed {reference}")),
+    );
+    lines.extend(
+        report
+            .skipped_images
+            .iter()
+            .map(|image| format!("Kept {}: {}", image.reference, image.reason)),
+    );
+    lines
 }
 
 fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -> String {
@@ -907,7 +1012,7 @@ fn render_clean(report: &CleanReport, format: OutputFormat, fields: &[String]) -
     }
 }
 
-const CANDIDATE_FIELDS: [&str; 12] = [
+const CANDIDATE_FIELDS: [&str; 13] = [
     "kind",
     "ecosystem",
     "scope",
@@ -918,6 +1023,7 @@ const CANDIDATE_FIELDS: [&str; 12] = [
     "modified_unix",
     "age_days",
     "protected",
+    "protection_note",
     "network_restore",
     "cleanable",
 ];
@@ -943,7 +1049,7 @@ const NATIVE_RESOURCE_FIELDS: [&str; 9] = [
     "scope",
 ];
 
-const NATIVE_CLEAN_FIELDS: [&str; 11] = [
+const NATIVE_CLEAN_FIELDS: [&str; 14] = [
     "provider",
     "kind",
     "changed",
@@ -954,6 +1060,9 @@ const NATIVE_CLEAN_FIELDS: [&str; 11] = [
     "reported_reclaimed_bytes",
     "estimated_removed_bytes",
     "trim",
+    "images",
+    "removed_images",
+    "skipped_images",
     "diagnostics",
 ];
 

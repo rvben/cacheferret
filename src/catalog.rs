@@ -59,6 +59,13 @@ pub fn catalog() -> Vec<CatalogEntry> {
             false
         ),
         entry!(
+            "cargo-incremental",
+            "rust",
+            Project,
+            "Cargo incremental compilation cache inside a target directory",
+            false
+        ),
+        entry!(
             "cargo-registry",
             "rust",
             Global,
@@ -454,6 +461,9 @@ pub(crate) fn identify_project_cache(path: &Path) -> Option<ProjectKind> {
         "target" if parent.join("Cargo.toml").is_file() => {
             Some(project("cargo-target", "rust", false))
         }
+        "incremental" if is_cargo_profile_directory(parent) => {
+            Some(project("cargo-incremental", "rust", false))
+        }
         "target" if parent.join("pom.xml").is_file() => Some(project("maven-target", "jvm", false)),
         ".venv" | "venv" if path.join("pyvenv.cfg").is_file() => {
             Some(project("python-venv", "python", true))
@@ -539,6 +549,24 @@ fn project(kind: &'static str, ecosystem: &'static str, network_restore: bool) -
         ecosystem,
         network_restore,
     }
+}
+
+/// A Cargo profile output directory such as `target/debug` or
+/// `target/<triple>/release`: it holds Cargo's build lock and fingerprints and
+/// sits directly in a Cargo target directory or in a target-triple directory
+/// inside one.
+pub(crate) fn is_cargo_profile_directory(path: &Path) -> bool {
+    if !path.join(".cargo-lock").is_file() || !path.join(".fingerprint").is_dir() {
+        return false;
+    }
+    let is_cargo_target = |dir: &Path| {
+        dir.file_name().and_then(|name| name.to_str()) == Some("target")
+            && dir
+                .parent()
+                .is_some_and(|root| root.join("Cargo.toml").is_file())
+    };
+    path.parent()
+        .is_some_and(|dir| is_cargo_target(dir) || dir.parent().is_some_and(is_cargo_target))
 }
 
 fn has_any_file(parent: &Path, names: &[&str]) -> bool {

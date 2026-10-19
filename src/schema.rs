@@ -54,7 +54,7 @@ pub fn contract() -> Value {
             },
             {
                 "name": "docker",
-                "description": "Inspect Docker-managed storage without changing daemon state. Build-cache cleanup is available as docker clean.",
+                "description": "Inspect Docker-managed storage without changing daemon state. Build-cache and unused-image cleanup are available as docker clean.",
                 "effects": "read_only",
                 "mutating": false,
                 "cardinality": "unbounded",
@@ -72,7 +72,7 @@ pub fn contract() -> Value {
             },
             {
                 "name": "docker clean",
-                "description": "Prune ordinary Docker build cache after a fresh preview and confirmation. Never prunes images, containers, volumes, or internal/frontend cache records selected by --all.",
+                "description": "Prune ordinary Docker build cache after a fresh preview and confirmation, or with --unused-images remove the tagged images no container (running or stopped) uses. Image removal runs docker image rm per reference without force, and keeps an image that changed or gained a container since the preview. Never removes containers, volumes, untagged images, or internal/frontend cache records selected by --all.",
                 "effects": "idempotent",
                 "mutating": true,
                 "cardinality": "single",
@@ -298,8 +298,9 @@ fn native_inspection_args() -> Vec<Value> {
 
 fn native_clean_args() -> Vec<Value> {
     vec![
-        json!({"name": "--dry-run", "type": "boolean", "default": false, "description": "Freshly inspect and report the build-cache prune without changing Docker state."}),
-        json!({"name": "--yes", "short": "-y", "type": "boolean", "default": false, "description": "Confirm the build-cache prune non-interactively."}),
+        json!({"name": "--unused-images", "type": "boolean", "default": false, "description": "Remove tagged images that no container, running or stopped, uses instead of pruning the build cache. They must be downloaded or rebuilt again before use."}),
+        json!({"name": "--dry-run", "type": "boolean", "default": false, "description": "Freshly inspect and report the cleanup without changing Docker state."}),
+        json!({"name": "--yes", "short": "-y", "type": "boolean", "default": false, "description": "Confirm the cleanup non-interactively."}),
         json!({"name": "--fields", "type": "string[]", "required": false, "description": "Report fields to include in structured output."}),
     ]
 }
@@ -307,7 +308,7 @@ fn native_clean_args() -> Vec<Value> {
 fn native_clean_fields() -> Vec<Value> {
     vec![
         json!({"name": "provider", "type": "string", "enum": ["docker"]}),
-        json!({"name": "kind", "type": "string", "enum": ["docker-build-cache"]}),
+        json!({"name": "kind", "type": "string", "enum": ["docker-build-cache", "docker-images"]}),
         json!({"name": "changed", "type": "boolean"}),
         json!({"name": "dry_run", "type": "boolean"}),
         json!({"name": "confirmed", "type": "boolean"}),
@@ -320,6 +321,18 @@ fn native_clean_fields() -> Vec<Value> {
             {"name": "profile", "type": "string"},
             {"name": "trim_reported_bytes", "type": "integer", "nullable": true}
         ]}),
+        json!({"name": "images", "type": "array", "description": "Unused tagged images the cleanup covers, largest unshared size first. Empty for the build cache.", "items": {"type": "object", "fields": [
+            {"name": "reference", "type": "string", "description": "repository:tag, the name the image is removed by."},
+            {"name": "id", "type": "string"},
+            {"name": "bytes", "type": "integer", "description": "Logical size, including layers shared with other images."},
+            {"name": "unique_bytes", "type": "integer", "description": "Size of the layers no other image shares; removal frees at least this."},
+            {"name": "created", "type": "string", "nullable": true, "description": "Docker's relative creation time, such as \"5 days ago\"."}
+        ]}}),
+        json!({"name": "removed_images", "type": "array", "items": {"type": "string"}, "description": "References of the images that were removed."}),
+        json!({"name": "skipped_images", "type": "array", "description": "Confirmed images that were kept: Docker refused them, or they changed or gained a container after the preview.", "items": {"type": "object", "fields": [
+            {"name": "reference", "type": "string"},
+            {"name": "reason", "type": "string"}
+        ]}}),
         json!({"name": "diagnostics", "type": "array", "items": {"type": "object", "fields": [
             {"name": "provider", "type": "string"},
             {"name": "kind", "type": "string"},
@@ -338,7 +351,7 @@ fn native_resource_fields() -> Vec<Value> {
         json!({"name": "active_count", "type": "integer"}),
         json!({"name": "bytes", "type": "integer"}),
         json!({"name": "reclaimable_bytes", "type": "integer"}),
-        json!({"name": "cleanable", "type": "boolean", "description": "True only for resource classes with a bounded, separately confirmed native cleanup flow. Currently Docker build cache only."}),
+        json!({"name": "cleanable", "type": "boolean", "description": "True only for resource classes with a bounded, separately confirmed native cleanup flow. Docker build cache in the TUI; unused tagged images are removed with docker clean --unused-images."}),
     ]
 }
 
@@ -354,6 +367,7 @@ fn candidate_fields() -> Vec<Value> {
         json!({"name": "modified_unix", "type": "integer", "nullable": true}),
         json!({"name": "age_days", "type": "integer", "nullable": true}),
         json!({"name": "protected", "type": "boolean"}),
+        json!({"name": "protection_note", "type": "string", "nullable": true, "description": "Why the entry is unprotected although its age alone would protect it, such as an incremental compilation cache or a simulator runtime superseded by a newer one."}),
         json!({"name": "network_restore", "type": "boolean"}),
         json!({"name": "cleanable", "type": "boolean"}),
     ]

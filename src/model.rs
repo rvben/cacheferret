@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +57,7 @@ pub struct DiscoveredCache {
 #[derive(Debug, Clone)]
 pub enum DiscoveryEvent {
     Discovered(DiscoveredCache),
-    Measured(CacheCandidate),
+    Measured(Box<CacheCandidate>),
     Skipped { path: PathBuf },
     Warning(String),
 }
@@ -78,6 +79,9 @@ pub struct CacheCandidate {
     pub modified_unix: Option<u64>,
     pub age_days: Option<u64>,
     pub protected: bool,
+    /// Why the entry is unprotected although its age alone would protect it,
+    /// such as a cache the next build recreates or a superseded runtime.
+    pub protection_note: Option<String>,
     pub network_restore: bool,
     pub cleanable: bool,
     #[serde(skip)]
@@ -156,7 +160,54 @@ pub struct NativeReport {
     pub diagnostics: Vec<NativeDiagnostic>,
 }
 
-/// Result of a Docker-owned build-cache preview or prune operation.
+/// A tagged Docker image that no container, running or stopped, was created from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DockerImage {
+    /// `repository:tag`, the name the image is removed by.
+    pub reference: String,
+    pub id: String,
+    /// Logical size, including layers shared with other images.
+    pub bytes: u64,
+    /// Size of the layers no other image shares.
+    pub unique_bytes: u64,
+    /// Docker's relative creation time, such as `5 days ago`, when reported.
+    pub created: Option<String>,
+}
+
+/// An image that was confirmed for removal but kept, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedImage {
+    pub reference: String,
+    pub reason: String,
+}
+
+/// The unused tagged images found by a fresh Docker inspection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusedDockerImages {
+    /// The `Images` storage class as `docker system df` reports it.
+    pub resource: NativeResource,
+    pub images: Vec<DockerImage>,
+    pub diagnostics: Vec<NativeDiagnostic>,
+}
+
+impl UnusedDockerImages {
+    /// Space the removal frees at least: the unshared layers of each listed
+    /// image, counted once per image ID however many tags point at it.
+    pub fn unique_bytes(&self) -> u64 {
+        unique_image_bytes(&self.images)
+    }
+}
+
+/// Unshared bytes of `images`, counting each image ID once.
+pub fn unique_image_bytes(images: &[DockerImage]) -> u64 {
+    let mut seen = HashSet::new();
+    images
+        .iter()
+        .filter(|image| seen.insert(image.id.as_str()))
+        .fold(0, |total, image| total.saturating_add(image.unique_bytes))
+}
+
+/// Result of a Docker-owned build-cache or unused-image preview or cleanup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NativeCleanReport {
     pub provider: String,
@@ -171,6 +222,12 @@ pub struct NativeCleanReport {
     /// Host-side space return performed after the prune, when the Docker
     /// daemon runs inside a VM that does not release freed blocks by itself.
     pub trim: Option<NativeTrim>,
+    /// Unused tagged images the operation covers; empty for the build cache.
+    pub images: Vec<DockerImage>,
+    /// References of the images that were removed.
+    pub removed_images: Vec<String>,
+    /// Confirmed images that were kept, with the reason.
+    pub skipped_images: Vec<SkippedImage>,
     pub diagnostics: Vec<NativeDiagnostic>,
 }
 
@@ -197,7 +254,19 @@ impl NativeCleanReport {
             reported_reclaimed_bytes: None,
             estimated_removed_bytes: 0,
             trim: None,
+            images: Vec::new(),
+            removed_images: Vec::new(),
+            skipped_images: Vec::new(),
             diagnostics: Vec::new(),
+        }
+    }
+
+    /// A preview of removing the unused tagged images, which changes nothing.
+    pub fn images_preview(unused: UnusedDockerImages, dry_run: bool, confirmed: bool) -> Self {
+        Self {
+            images: unused.images,
+            diagnostics: unused.diagnostics,
+            ..Self::preview(unused.resource, dry_run, confirmed)
         }
     }
 }
@@ -217,19 +286,49 @@ impl NativeReport {
 }
 
 impl ScanReport {
+    /// Apparent size of every listed cache, counting a cache that lies inside
+    /// another listed one only once.
     pub fn total_bytes(&self) -> u64 {
-        self.candidates
-            .iter()
+        outermost(&self.candidates)
+            .into_iter()
             .map(|candidate| candidate.bytes)
             .sum()
     }
 
+    /// Allocated size of every listed cache, counting a cache that lies inside
+    /// another listed one only once.
     pub fn total_allocated_bytes(&self) -> u64 {
-        self.candidates
-            .iter()
+        outermost(&self.candidates)
+            .into_iter()
             .map(|candidate| candidate.allocated_bytes)
             .sum()
     }
+}
+
+/// The candidates that do not lie inside another of the given candidates.
+///
+/// A cache can contain another listed cache, such as Cargo's incremental
+/// directory inside `target/`. Removing the outer one removes the inner one
+/// too, so sums and cleanup batches use only the outermost entries.
+pub fn outermost<'a, I>(candidates: I) -> Vec<&'a CacheCandidate>
+where
+    I: IntoIterator<Item = &'a CacheCandidate>,
+{
+    let candidates: Vec<&CacheCandidate> = candidates.into_iter().collect();
+    let paths: HashSet<&Path> = candidates
+        .iter()
+        .map(|candidate| candidate.path.as_path())
+        .collect();
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            !candidate
+                .path
+                .ancestors()
+                .skip(1)
+                .any(|ancestor| paths.contains(ancestor))
+        })
+        .collect()
 }
 
 /// One supported cache kind shown by `catalog`.

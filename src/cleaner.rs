@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 use crate::model::{FilesystemSpaceDelta, SkippedPath};
 use crate::native::{self, Removal};
 use crate::scanner::revalidate_for_delete;
-use crate::{CacheCandidate, CleanReport};
+use crate::{CacheCandidate, CleanReport, outermost};
 
 /// Revalidate and remove a batch of candidates.
 ///
@@ -42,10 +42,10 @@ where
         .iter()
         .filter(|candidate| !candidate.cleanable)
         .count();
-    let candidates: Vec<&CacheCandidate> = candidates
-        .iter()
-        .filter(|candidate| candidate.cleanable)
-        .collect();
+    // A selected cache inside another selected cache is removed with it, so
+    // only the outermost one is acted on and counted.
+    let candidates: Vec<&CacheCandidate> =
+        outermost(candidates.iter().filter(|candidate| candidate.cleanable));
     let selected_targets = candidates
         .iter()
         .map(|candidate| (*candidate).into())
@@ -112,7 +112,17 @@ where
             });
             continue;
         }
-        match remove_candidate(candidate) {
+        let removed = match with_cargo_build_locks(candidate, || remove_candidate(candidate)) {
+            Ok(removed) => removed,
+            Err(reason) => {
+                skipped_paths.push(SkippedPath {
+                    path: candidate.path.clone(),
+                    reason,
+                });
+                continue;
+            }
+        };
+        match removed {
             Ok(removal) => {
                 if removal == Removal::Complete {
                     reclaimed = reclaimed.saturating_add(candidate.bytes);
@@ -175,6 +185,91 @@ where
         deferred_paths,
         skipped_paths,
     }
+}
+
+/// Lock files Cargo holds exclusively for as long as a build of a profile runs.
+const CARGO_LOCK_FILES: [&str; 3] = [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
+
+/// Run `action` while holding every Cargo build lock that guards a Cargo
+/// cache, or refuse without running it when a lock is busy.
+///
+/// Cargo holds these `flock` locks exclusively in each profile directory for
+/// the whole build, rustc included, so a busy lock means a build is using the
+/// cache right now. The locks stay held until `action` returns, so a build
+/// started meanwhile waits for the removal to finish. An incremental cache is
+/// guarded by its own profile's locks, a target directory by the locks of
+/// every profile inside it. Other kinds run `action` directly.
+fn with_cargo_build_locks<T>(
+    candidate: &CacheCandidate,
+    action: impl FnOnce() -> T,
+) -> Result<T, String> {
+    let _held = cargo_build_locks(candidate)?;
+    Ok(action())
+}
+
+fn cargo_build_locks(candidate: &CacheCandidate) -> Result<Vec<fs::File>, String> {
+    let profiles: Vec<PathBuf> = match candidate.kind.as_str() {
+        "cargo-incremental" => candidate
+            .path
+            .parent()
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect(),
+        "cargo-target" => cargo_profile_directories(&candidate.path),
+        _ => return Ok(Vec::new()),
+    };
+    let mut held = Vec::new();
+    for profile in profiles {
+        for name in CARGO_LOCK_FILES {
+            let path = profile.join(name);
+            let file = match fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "cannot open Cargo build lock {}: {error}",
+                        path.display()
+                    ));
+                }
+            };
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err("a Cargo build is using this target".to_owned());
+                }
+                Err(fs::TryLockError::Error(error)) => {
+                    return Err(format!(
+                        "cannot lock Cargo build lock {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+            held.push(file);
+        }
+    }
+    Ok(held)
+}
+
+/// Profile directories of a Cargo target directory: `target/<profile>` and
+/// `target/<triple>/<profile>`, recognized by their `.cargo-lock`.
+fn cargo_profile_directories(target: &Path) -> Vec<PathBuf> {
+    let subdirectories = |dir: &Path| -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect()
+    };
+    subdirectories(target)
+        .into_iter()
+        .flat_map(|child| {
+            let nested = subdirectories(&child);
+            std::iter::once(child).chain(nested)
+        })
+        .filter(|dir| dir.join(".cargo-lock").is_file())
+        .collect()
 }
 
 /// Native kinds are removed by the tool that owns them; everything else is a
@@ -340,6 +435,202 @@ mod tests {
         assert_eq!(report.cleaned, 1);
         assert!(!project.join("target").exists());
         assert!(project.join("Cargo.toml").exists());
+    }
+
+    /// The lock files Cargo 1.96 creates in every profile directory and holds
+    /// exclusively during a build.
+    const BUILD_LOCKS: [&str; 3] = [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
+
+    /// A Cargo project with a host profile and a cross-compiled profile, each
+    /// holding Cargo's build lock files and an incremental cache.
+    fn cargo_project(root: &Path) -> PathBuf {
+        let project = root.join("demo");
+        let target = project.join("target");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        for profile in [
+            target.join("debug"),
+            target.join("aarch64-apple-darwin/debug"),
+        ] {
+            fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+            fs::create_dir_all(profile.join("incremental/demo-1")).unwrap();
+            for lock in BUILD_LOCKS {
+                fs::write(profile.join(lock), b"").unwrap();
+            }
+            fs::write(
+                profile.join("incremental/demo-1/query-cache.bin"),
+                [1_u8; 64],
+            )
+            .unwrap();
+        }
+        target
+    }
+
+    fn scan(root: &Path, kinds: &[&str]) -> Vec<CacheCandidate> {
+        discover(&DiscoveryOptions {
+            roots: vec![root.to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
+            protect_days: 0,
+        })
+        .unwrap()
+        .candidates
+    }
+
+    /// Hold one of Cargo's lock files the way a running build does.
+    fn hold_build_lock(path: &Path) -> fs::File {
+        let file = fs::File::open(path).unwrap();
+        file.try_lock().unwrap();
+        file
+    }
+
+    #[test]
+    fn removes_an_idle_incremental_cache_and_keeps_the_rest_of_the_target() {
+        let temp = tempdir().unwrap();
+        let target = cargo_project(temp.path());
+        let candidates = scan(temp.path(), &["cargo-incremental"]);
+        assert_eq!(candidates.len(), 2);
+
+        let report = clean_candidates(&candidates, false);
+
+        assert_eq!(report.cleaned, 2, "{:?}", report.skipped_paths);
+        for profile in [
+            target.join("debug"),
+            target.join("aarch64-apple-darwin/debug"),
+        ] {
+            assert!(!profile.join("incremental").exists());
+            assert!(profile.join(".fingerprint").is_dir());
+            assert!(profile.join(".cargo-lock").is_file());
+        }
+    }
+
+    #[test]
+    fn refuses_an_incremental_cache_while_any_build_lock_of_its_profile_is_held() {
+        for lock in BUILD_LOCKS {
+            let temp = tempdir().unwrap();
+            let target = cargo_project(temp.path());
+            let busy = target.join("aarch64-apple-darwin/debug");
+            let candidates = scan(temp.path(), &["cargo-incremental"]);
+            let _build = hold_build_lock(&busy.join(lock));
+
+            let report = clean_candidates(&candidates, false);
+
+            assert_eq!(report.cleaned, 1, "{lock}");
+            assert_eq!(report.skipped_paths.len(), 1, "{lock}");
+            assert_eq!(
+                report.skipped_paths[0].reason,
+                "a Cargo build is using this target"
+            );
+            assert!(
+                report.skipped_paths[0]
+                    .path
+                    .ends_with("aarch64-apple-darwin/debug/incremental")
+            );
+            assert!(
+                busy.join("incremental/demo-1/query-cache.bin").is_file(),
+                "{lock}"
+            );
+            assert!(!target.join("debug/incremental").exists(), "{lock}");
+        }
+    }
+
+    #[test]
+    fn a_build_lock_released_before_the_clean_does_not_block_it() {
+        let temp = tempdir().unwrap();
+        let target = cargo_project(temp.path());
+        let candidates = scan(temp.path(), &["cargo-incremental"]);
+        drop(hold_build_lock(&target.join("debug/.cargo-lock")));
+
+        let report = clean_candidates(&candidates, false);
+
+        assert_eq!(report.cleaned, 2, "{:?}", report.skipped_paths);
+    }
+
+    #[test]
+    fn refuses_a_cargo_target_while_a_build_of_any_profile_holds_its_lock() {
+        let temp = tempdir().unwrap();
+        let target = cargo_project(temp.path());
+        let candidates = scan(temp.path(), &["cargo-target"]);
+        let build = hold_build_lock(&target.join("aarch64-apple-darwin/debug/.cargo-build-lock"));
+
+        let refused = clean_candidates(&candidates, false);
+        assert_eq!(refused.cleaned, 0);
+        assert_eq!(
+            refused.skipped_paths[0].reason,
+            "a Cargo build is using this target"
+        );
+        assert!(target.join("debug/incremental").is_dir());
+
+        drop(build);
+        let report = clean_candidates(&candidates, false);
+        assert_eq!(report.cleaned, 1, "{:?}", report.skipped_paths);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn build_locks_stay_held_until_the_removal_returns() {
+        let temp = tempdir().unwrap();
+        let target = cargo_project(temp.path());
+        let candidates = scan(temp.path(), &["cargo-incremental", "cargo-target"]);
+        for candidate in &candidates {
+            let profile = if candidate.kind == "cargo-incremental" {
+                candidate.path.parent().unwrap().to_path_buf()
+            } else {
+                target.join("aarch64-apple-darwin/debug")
+            };
+            let during = with_cargo_build_locks(candidate, || {
+                BUILD_LOCKS.map(|lock| {
+                    matches!(
+                        fs::File::open(profile.join(lock)).unwrap().try_lock(),
+                        Err(fs::TryLockError::WouldBlock)
+                    )
+                })
+            })
+            .unwrap();
+            assert_eq!(during, [true; 3], "{}", candidate.path.display());
+            for lock in BUILD_LOCKS {
+                drop(hold_build_lock(&profile.join(lock)));
+            }
+        }
+    }
+
+    #[test]
+    fn other_kinds_run_without_cargo_locks() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("web");
+        fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        fs::write(project.join("package.json"), "{}").unwrap();
+        let candidates = scan(temp.path(), &[]);
+
+        assert_eq!(with_cargo_build_locks(&candidates[0], || 7), Ok(7));
+    }
+
+    #[test]
+    fn a_selected_cache_inside_another_selected_cache_is_removed_once_with_it() {
+        let temp = tempdir().unwrap();
+        let target = cargo_project(temp.path());
+        let candidates = scan(temp.path(), &[]);
+        assert_eq!(candidates.len(), 3);
+        let outer = candidates
+            .iter()
+            .find(|candidate| candidate.kind == "cargo-target")
+            .unwrap();
+
+        let preview = clean_candidates(&candidates, true);
+        assert_eq!(preview.selected, 1);
+        assert_eq!(preview.bytes_selected, outer.bytes);
+
+        let report = clean_candidates(&candidates, false);
+        assert_eq!(report.selected, 1);
+        assert_eq!(report.cleaned, 1);
+        assert!(
+            report.skipped_paths.is_empty(),
+            "{:?}",
+            report.skipped_paths
+        );
+        assert_eq!(report.cleaned_paths, vec![outer.path.clone()]);
+        assert_eq!(report.apparent_bytes_removed, outer.bytes);
+        assert!(!target.exists());
     }
 
     #[cfg(unix)]

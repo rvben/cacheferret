@@ -46,7 +46,7 @@ struct DeviceHome {
     directory: PathBuf,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Runtime {
     identifier: String,
     runtime_identifier: String,
@@ -80,7 +80,7 @@ pub(crate) fn plan_runtimes() -> (Vec<Planned>, Vec<String>) {
             (
                 runtimes
                     .iter()
-                    .map(|runtime| runtime_plan(runtime, devices.as_deref()))
+                    .map(|runtime| runtime_plan(runtime, &runtimes, devices.as_deref()))
                     .collect(),
                 warnings,
             )
@@ -130,23 +130,23 @@ pub(crate) fn resolve_device(candidate: &CacheCandidate) -> Result<Resolved, Str
 pub(crate) fn resolve_runtime(candidate: &CacheCandidate) -> Result<Resolved, String> {
     let (runtimes, _) = query_runtimes().map_err(|unavailable| unavailable.message("simctl"))?;
     let runtime = runtimes
-        .into_iter()
+        .iter()
         .find(|runtime| runtime.path == candidate.path)
         .ok_or_else(|| "simulator runtime is no longer installed".to_owned())?;
     if !runtime.deletable {
         return Err("simctl reports this simulator runtime as not deletable".to_owned());
     }
     let devices = query_devices().map_err(|unavailable| unavailable.message("simctl"))?;
-    if let Some(running) = device_using(&runtime, &devices) {
+    if let Some(running) = device_using(runtime, &devices) {
         return Err(format!(
             "simulator device {} is {} and uses this runtime",
             running.name,
             running.state.to_lowercase()
         ));
     }
-    let planned = runtime_plan(&runtime, Some(&devices));
+    let planned = runtime_plan(runtime, &runtimes, Some(&devices));
     Ok(Resolved {
-        target: Target::Runtime(runtime.identifier),
+        target: Target::Runtime(runtime.identifier.clone()),
         planned,
     })
 }
@@ -216,6 +216,7 @@ fn device_plan(device: &Device) -> Option<Planned> {
         )),
         network_restore: false,
         cleanable: device.state == SHUTDOWN,
+        unprotected_because: None,
         sizing: Sizing::Tree {
             age: AgeSignal::DeviceData,
             minimum_bytes: MINIMUM_DEVICE_BYTES,
@@ -223,8 +224,9 @@ fn device_plan(device: &Device) -> Option<Planned> {
     })
 }
 
-/// `devices` is the current device list, or `None` when it is unavailable.
-fn runtime_plan(runtime: &Runtime, devices: Option<&[Device]>) -> Planned {
+/// `runtimes` is every installed runtime; `devices` is the current device
+/// list, or `None` when it is unavailable.
+fn runtime_plan(runtime: &Runtime, runtimes: &[Runtime], devices: Option<&[Device]>) -> Planned {
     let label = match (&runtime.version, &runtime.build) {
         (Some(version), Some(build)) => format!(
             "{} {version} ({build})",
@@ -240,11 +242,81 @@ fn runtime_plan(runtime: &Runtime, devices: Option<&[Device]>) -> Planned {
         network_restore: true,
         cleanable: runtime.deletable
             && devices.is_some_and(|devices| device_using(runtime, devices).is_none()),
+        unprotected_because: devices
+            .and_then(|devices| superseded(runtime, runtimes, devices, native::has_installed_apps)),
         sizing: Sizing::Reported {
             bytes: runtime.size_bytes,
             last_used_unix: runtime.last_used_unix,
         },
     }
+}
+
+/// Why a runtime can go whatever its recorded use: a newer runtime for the
+/// same platform is installed, and every device on this one is shut down and
+/// holds no installed app. Xcode creates a default set of devices for each
+/// runtime, so a runtime that was never used still has devices; an empty
+/// device is recreated on demand and holds nothing to lose. `None` when any
+/// device on the runtime is running, holds apps, or has an untrusted data
+/// path, or when no newer runtime for the platform is installed.
+fn superseded(
+    runtime: &Runtime,
+    runtimes: &[Runtime],
+    devices: &[Device],
+    holds_apps: impl Fn(&Path) -> bool,
+) -> Option<String> {
+    let version = runtime_version(runtime)?;
+    let platform = runtime_platform(&runtime.runtime_identifier);
+    let newer = runtimes
+        .iter()
+        .filter(|other| runtime_platform(&other.runtime_identifier) == platform)
+        .filter_map(|other| Some((runtime_version(other)?, other)))
+        .filter(|(other_version, _)| *other_version > version)
+        .max_by(|(left, _), (right, _)| left.cmp(right))?
+        .1;
+    let on_runtime: Vec<&Device> = devices
+        .iter()
+        .filter(|device| device.runtime_key == runtime.runtime_identifier)
+        .collect();
+    let all_empty = on_runtime.iter().all(|device| {
+        device.state == SHUTDOWN
+            && device
+                .home
+                .as_ref()
+                .is_some_and(|home| !holds_apps(&home.directory))
+    });
+    if !all_empty {
+        return None;
+    }
+    let newer_name = runtime_name(&newer.runtime_identifier);
+    Some(match on_runtime.len() {
+        0 => format!("superseded by {newer_name}; no simulator device uses it"),
+        1 => format!("superseded by {newer_name}; its one simulator device holds no apps"),
+        count => {
+            format!("superseded by {newer_name}; its {count} simulator devices hold no apps")
+        }
+    })
+}
+
+/// The runtime's dotted version as numbers, from the reported version or else
+/// from the runtime identifier (`iOS-26-5`). `None` when neither parses.
+fn runtime_version(runtime: &Runtime) -> Option<Vec<u64>> {
+    let parse = |text: &str, separator: char| -> Option<Vec<u64>> {
+        text.split(separator)
+            .map(|part| part.parse().ok())
+            .collect::<Option<Vec<u64>>>()
+            .filter(|parts| !parts.is_empty())
+    };
+    runtime
+        .version
+        .as_deref()
+        .and_then(|version| parse(version, '.'))
+        .or_else(|| {
+            let short = runtime
+                .runtime_identifier
+                .strip_prefix(RUNTIME_KEY_PREFIX)
+                .unwrap_or(&runtime.runtime_identifier);
+            parse(short.split_once('-')?.1, '-')
+        })
 }
 
 /// `com.apple.CoreSimulator.SimRuntime.iOS-26-5` reads as `iOS 26.5`.
@@ -554,7 +626,7 @@ mod tests {
 
         let locked = by_build("23F77");
         assert!(!locked.deletable);
-        let planned = runtime_plan(locked, Some(&[]));
+        let planned = runtime_plan(locked, &[], Some(&[]));
         assert!(!planned.cleanable);
         assert!(planned.network_restore);
         assert_eq!(planned.label.as_deref(), Some("iOS 26.5 (23F77)"));
@@ -579,9 +651,9 @@ mod tests {
             .iter()
             .find(|runtime| runtime.build.as_deref() == Some("22S99"))
             .unwrap();
-        assert!(runtime_plan(usable, Some(&[])).cleanable);
+        assert!(runtime_plan(usable, &[], Some(&[])).cleanable);
         assert!(
-            !runtime_plan(usable, None).cleanable,
+            !runtime_plan(usable, &[], None).cleanable,
             "device list unavailable"
         );
         let booted = Device {
@@ -590,7 +662,169 @@ mod tests {
             runtime_key: usable.runtime_identifier.clone(),
             home: None,
         };
-        assert!(!runtime_plan(usable, Some(&[booted])).cleanable);
+        assert!(!runtime_plan(usable, &[], Some(&[booted])).cleanable);
+    }
+
+    fn runtime(key: &str, version: Option<&str>, build: &str) -> Runtime {
+        Runtime {
+            identifier: "5C29E7B8-A172-4CC5-B491-8F4DDA3C9AB2".to_owned(),
+            runtime_identifier: format!("{RUNTIME_KEY_PREFIX}{key}"),
+            path: PathBuf::from(format!(
+                "/Library/Developer/CoreSimulator/Images/{build}.dmg"
+            )),
+            build: Some(build.to_owned()),
+            version: version.map(str::to_owned),
+            size_bytes: 4_000_000_000,
+            deletable: true,
+            last_used_unix: None,
+        }
+    }
+
+    fn device_on(runtime: &Runtime, state: &str, udid: &str) -> Device {
+        Device {
+            name: format!("Device {udid}"),
+            state: state.to_owned(),
+            runtime_key: runtime.runtime_identifier.clone(),
+            home: Some(DeviceHome {
+                udid: udid.to_owned(),
+                directory: PathBuf::from(format!("/Users/example/Devices/{udid}")),
+            }),
+        }
+    }
+
+    const NO_APPS: fn(&Path) -> bool = |_| false;
+
+    #[test]
+    fn an_older_runtime_whose_devices_are_all_empty_is_superseded() {
+        let old = runtime("watchOS-11-2", Some("11.2"), "22S99");
+        let new = runtime("watchOS-26-5", Some("26.5"), "23T570");
+        let runtimes = [old.clone(), new.clone()];
+
+        assert_eq!(
+            superseded(&old, &runtimes, &[], NO_APPS).as_deref(),
+            Some("superseded by watchOS 26.5; no simulator device uses it")
+        );
+        let one = [device_on(&old, SHUTDOWN, "A")];
+        assert_eq!(
+            superseded(&old, &runtimes, &one, NO_APPS).as_deref(),
+            Some("superseded by watchOS 26.5; its one simulator device holds no apps")
+        );
+        let two = [
+            device_on(&old, SHUTDOWN, "A"),
+            device_on(&old, SHUTDOWN, "B"),
+        ];
+        assert_eq!(
+            superseded(&old, &runtimes, &two, NO_APPS).as_deref(),
+            Some("superseded by watchOS 26.5; its 2 simulator devices hold no apps")
+        );
+        assert_eq!(superseded(&new, &runtimes, &two, NO_APPS), None, "newest");
+        let busy_elsewhere = [device_on(&new, "Booted", "C")];
+        assert!(
+            superseded(&old, &runtimes, &busy_elsewhere, |_| true).is_some(),
+            "devices on other runtimes do not count"
+        );
+    }
+
+    #[test]
+    fn a_device_that_runs_holds_apps_or_cannot_be_inspected_keeps_its_runtime() {
+        let old = runtime("iOS-18-2", Some("18.2"), "22C150");
+        let runtimes = [old.clone(), runtime("iOS-26-5", Some("26.5"), "23F77")];
+        let holds = device_on(&old, SHUTDOWN, "HOLDS");
+        let empty = device_on(&old, SHUTDOWN, "EMPTY");
+        let apps_in_holds = |directory: &Path| directory.ends_with("HOLDS");
+
+        assert_eq!(
+            superseded(&old, &runtimes, &[empty, holds], apps_in_holds),
+            None,
+            "a device holds apps"
+        );
+        let booted = device_on(&old, "Booted", "EMPTY");
+        assert_eq!(
+            superseded(&old, &runtimes, &[booted], NO_APPS),
+            None,
+            "running"
+        );
+        let mut untrusted = device_on(&old, SHUTDOWN, "EMPTY");
+        untrusted.home = None;
+        assert_eq!(
+            superseded(&old, &runtimes, &[untrusted], NO_APPS),
+            None,
+            "contents unknown"
+        );
+    }
+
+    #[test]
+    fn only_a_strictly_newer_runtime_of_the_same_platform_supersedes() {
+        let ios_18 = runtime("iOS-18-2", Some("18.2"), "22C150");
+        let watch_26 = runtime("watchOS-26-5", Some("26.5"), "23T570");
+        assert_eq!(
+            superseded(&ios_18, &[ios_18.clone(), watch_26], &[], NO_APPS),
+            None,
+            "another platform"
+        );
+        let rebuild = runtime("iOS-18-2", Some("18.2"), "22C151");
+        assert_eq!(
+            superseded(&ios_18, &[ios_18.clone(), rebuild], &[], NO_APPS),
+            None,
+            "same version"
+        );
+        let ios_9 = runtime("iOS-9-3", Some("9.3"), "13E230");
+        let ios_10 = runtime("iOS-10-0", Some("10.0"), "14A345");
+        assert!(
+            superseded(&ios_9, &[ios_9.clone(), ios_10.clone()], &[], NO_APPS).is_some(),
+            "versions compare numerically"
+        );
+        assert_eq!(
+            superseded(&ios_10, &[ios_9.clone(), ios_10.clone()], &[], NO_APPS),
+            None
+        );
+        let ios_9_5 = runtime("iOS-9-5", Some("9.5"), "13G36");
+        assert_eq!(
+            superseded(&ios_9, &[ios_9.clone(), ios_9_5, ios_10], &[], NO_APPS).as_deref(),
+            Some("superseded by iOS 10.0; no simulator device uses it"),
+            "the newest is chosen numerically"
+        );
+        let point = runtime("iOS-18-2-1", None, "22C161");
+        assert_eq!(
+            superseded(&ios_18, &[ios_18.clone(), point], &[], NO_APPS).as_deref(),
+            Some("superseded by iOS 18.2.1; no simulator device uses it"),
+            "version read from the identifier"
+        );
+        let newest = [
+            ios_18.clone(),
+            runtime("iOS-26-5", Some("26.5"), "23F77"),
+            runtime("iOS-26-0", Some("26.0"), "23A339"),
+        ];
+        assert!(
+            superseded(&ios_18, &newest, &[], NO_APPS)
+                .unwrap()
+                .starts_with("superseded by iOS 26.5;"),
+            "names the newest"
+        );
+    }
+
+    #[test]
+    fn a_superseded_runtime_is_unprotected_only_with_the_device_list() {
+        let old = runtime("watchOS-11-2", Some("11.2"), "22S99");
+        let runtimes = [old.clone(), runtime("watchOS-26-5", Some("26.5"), "23T570")];
+
+        let without_devices = runtime_plan(&old, &runtimes, None);
+        assert_eq!(without_devices.unprotected_because, None);
+        let measured = native::measure(without_devices, 7, 2_000_000_000).unwrap();
+        assert!(measured.protected, "unknown use stays protected");
+
+        let planned = runtime_plan(&old, &runtimes, Some(&[]));
+        assert!(planned.cleanable);
+        let measured = native::measure(planned, 7, 2_000_000_000).unwrap();
+        assert_eq!(measured.age_days, None);
+        assert!(!measured.protected);
+        assert_eq!(
+            measured.protection_note.as_deref(),
+            Some("superseded by watchOS 26.5; no simulator device uses it")
+        );
+
+        let newest = runtime_plan(&runtimes[1], &runtimes, Some(&[]));
+        assert!(native::measure(newest, 7, 2_000_000_000).unwrap().protected);
     }
 
     #[test]
@@ -617,7 +851,10 @@ mod tests {
                 device_using(usable, &devices).is_some(),
                 "blocks the runtime: {entry}"
             );
-            assert!(!runtime_plan(usable, Some(&devices)).cleanable, "{entry}");
+            assert!(
+                !runtime_plan(usable, &[], Some(&devices)).cleanable,
+                "{entry}"
+            );
         }
     }
 

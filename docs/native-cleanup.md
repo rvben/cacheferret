@@ -15,8 +15,19 @@ the ordinary build-cache estimate, always requires confirmation unless `--yes`
 is explicit, revalidates again, and invokes only `docker builder prune --force`.
 It never uses `--all` or any system-, image-, container-, or volume-prune action.
 
+`cacheferret docker clean --unused-images` reads
+`docker system df --verbose --format json` and offers every tagged image whose
+container count is zero, largest unique size first. Untagged images and images
+whose count cannot be read are never offered. After confirmation each image is
+looked up again in a fresh listing and removed only if the same reference still
+names the same image ID with no container, one `docker image rm -- <ref>` per
+image and never `--force`. Docker's own refusal, a changed ID, or a new
+container keeps the image and is reported with its reason. Unique sizes are
+summed once per image ID, so an image with two tags is not counted twice.
+
 When the active Docker endpoint (`$DOCKER_HOST`, else `docker context inspect`)
-is a Colima socket (`.../.colima/<profile>/docker.sock`), a successful prune is
+is a Colima socket (`.../.colima/<profile>/docker.sock`), a successful prune or
+image removal is
 followed by `colima ssh --profile <profile> -- sudo fstrim -v /var/lib/docker`.
 Colima mounts the Docker data disk without discard, so without the trim the
 space freed inside the VM is not returned to the host disk. The trim is bounded
@@ -63,7 +74,7 @@ text output, and JSON schema.
 
 | Storage owner | Native inspection or cleanup | CacheFerret direction |
 | --- | --- | --- |
-| Docker | [`docker system df`](https://docs.docker.com/reference/cli/docker/system/df/), plus resource-specific `docker builder/image/container/volume prune` commands | Ordinary build-cache prune is implemented. Never delete Docker's data root; keep other classes inspection-only until each boundary is designed. |
+| Docker | [`docker system df`](https://docs.docker.com/reference/cli/docker/system/df/), plus resource-specific `docker builder/image/container/volume prune` commands | Ordinary build-cache prune and per-image removal of unused tagged images are implemented. Never delete Docker's data root; keep containers, volumes, and untagged images inspection-only until each boundary is designed. |
 | Homebrew | [`brew cleanup --dry-run` and `brew cleanup`](https://docs.brew.sh/Manpage#cleanup-options-formulacask) | Good native-prune candidate because Homebrew owns download, version, and lock-file state. Keep autoremove separate from cache cleanup. |
 | pip | [`pip cache info`, `remove`, and `purge`](https://pip.pypa.io/en/stable/cli/pip_cache/) | A whole-cache action can use pip. Exact subdirectories can remain direct only while their boundaries are stable and validated. |
 | uv | [`uv cache clean` and `uv cache prune`](https://docs.astral.sh/uv/concepts/cache/#clearing-the-cache) | Prefer `prune` for garbage collection; expose full clean as the broader, download-backed action. |
@@ -72,8 +83,8 @@ text output, and JSON schema.
 | NuGet | [`dotnet nuget locals`](https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-locals) | Native clear is viable, but its named resource classes must be shown separately instead of collapsing `all` into one opaque target. |
 | rustup | `rustup toolchain list -v`, `rustup show home`, `rustup toolchain uninstall` | Implemented. Each installed toolchain is a candidate unless it is the default, a directory override, or `RUSTUP_TOOLCHAIN`, whether selected by name or by absolute directory path (compared by canonical path). The in-use set is read from `settings.toml`, and when that file is missing or not understood, or a selection is neither a name nor an absolute path, no toolchain is offered and a warning says so. Symlinked (linked) toolchains are skipped. |
 | Xcode simulator devices | `xcrun simctl list devices --json`, `xcrun simctl delete <udid>` | Implemented. Size is the device directory. Only devices with at least one installed app (a non-empty `data/Containers/Bundle/Application`) are listed, since a pristine device only removes an Xcode destination. Age is the newest modification time of a regular file under `data/`; directory times are ignored because CoreSimulator rewrites them, and a device with no files has an unknown age. Only `Shutdown` devices are cleanable, re-queried right before deletion. |
-| Xcode simulator runtimes | `xcrun simctl runtime list -j`, `xcrun simctl runtime delete <id>` | Implemented. Size is the `sizeBytes` simctl reports and age is `lastUsedAt` (unknown when absent). Only runtimes marked `deletable` are cleanable, and a runtime is refused while any non-shut-down device uses it. Restoring one means a download. |
-| Cargo project output | [`cargo clean`](https://doc.rust-lang.org/cargo/commands/cargo-clean.html) | Keep exact-path deletion by default. Cargo can resolve workspace and configured target directories beyond the focused candidate. |
+| Xcode simulator runtimes | `xcrun simctl runtime list -j`, `xcrun simctl runtime delete <id>` | Implemented. Size is the `sizeBytes` simctl reports and age is `lastUsedAt` (unknown when absent). Only runtimes marked `deletable` are cleanable, and a runtime is refused while any non-shut-down device uses it. A runtime is unprotected regardless of its age when a strictly newer runtime for the same platform is installed (versions compared numerically) and every device on it is shut down, has a trusted data path, and holds no apps; the scan names the newer runtime as the reason. Restoring one means a download. |
+| Cargo project output | [`cargo clean`](https://doc.rust-lang.org/cargo/commands/cargo-clean.html) | Keep exact-path deletion by default. Cargo can resolve workspace and configured target directories beyond the focused candidate. The `incremental` directory of each profile is its own candidate; its removal holds the profile's Cargo build locks and is refused while a build holds them. |
 
 Other ecosystems should be added only after the same boundary analysis. The
 existence of a `clean` command is not enough: it must identify what it will
@@ -123,9 +134,11 @@ treat as ordinary directories.
 4. Ordinary build cache is separately selectable and uses refreshed previews,
    mandatory confirmation, final native revalidation, and the bounded
    `docker builder prune --force` operation. This is implemented.
-5. Images, containers, volumes, and `builder prune --all` records remain
-   inspection-only. A combined system prune is outside the current product
-   boundary.
+5. Unused tagged images are removable from the CLI, one confirmed image at a
+   time with a per-image recheck. This is implemented.
+6. Containers, volumes, untagged images, and `builder prune --all` records
+   remain inspection-only. A combined system prune is outside the current
+   product boundary.
 
 This requires a native-resource model alongside `CacheCandidate`, not an
 exception that weakens the directory scanner's closed catalog.

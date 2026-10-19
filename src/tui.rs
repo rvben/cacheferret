@@ -634,10 +634,7 @@ impl App {
         if let Some(index) = self.focused_native_index() {
             let resource = &self.native_resources[index];
             if !resource.cleanable {
-                self.toast = Some((
-                    "This Docker resource is inspection-only".to_owned(),
-                    Instant::now(),
-                ));
+                self.toast = Some((inspection_only_message(resource, ""), Instant::now()));
                 return;
             }
             if !self.selected_native.remove(&resource.kind) {
@@ -801,7 +798,7 @@ impl App {
                 move |event| {
                     let message = match event {
                         DiscoveryEvent::Discovered(cache) => WorkerMessage::ScanDiscovered(cache),
-                        DiscoveryEvent::Measured(cache) => WorkerMessage::ScanMeasured(cache),
+                        DiscoveryEvent::Measured(cache) => WorkerMessage::ScanMeasured(*cache),
                         DiscoveryEvent::Skipped { path } => WorkerMessage::ScanSkipped(path),
                         DiscoveryEvent::Warning(warning) => WorkerMessage::ScanWarning(warning),
                     };
@@ -1110,8 +1107,7 @@ impl App {
                 let resource = self.native_resources[index].clone();
                 if !resource.cleanable {
                     self.toast = Some((
-                        "This Docker resource is inspection-only; no prune command was run"
-                            .to_owned(),
+                        inspection_only_message(&resource, "; no prune command was run"),
                         Instant::now(),
                     ));
                     return;
@@ -1240,13 +1236,28 @@ impl App {
     }
 }
 
+/// Unused tagged images are removed from the CLI, where the confirmation can
+/// list every image; the toast says so instead of only refusing.
+fn inspection_only_message(resource: &NativeResource, suffix: &str) -> String {
+    if resource.kind == "docker-images" {
+        format!(
+            "Docker images are inspection-only here{suffix}; run cacheferret docker clean --unused-images"
+        )
+    } else {
+        format!("This Docker resource is inspection-only{suffix}")
+    }
+}
+
 fn risk_reasons(candidate: &CacheCandidate) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if !candidate.cleanable {
         reasons.push("manual override");
     }
     match candidate.age_days {
-        Some(days) if days < RECENT_DAYS => reasons.push("recent"),
+        // A note means the entry is safe to remove however recently it was used.
+        Some(days) if days < RECENT_DAYS && candidate.protection_note.is_none() => {
+            reasons.push("recent")
+        }
         None => reasons.push("unknown age"),
         _ => {}
     }
@@ -2164,6 +2175,8 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
                 app.ui.separator(),
                 app.selected_count()
             )
+        } else if resource.kind == "docker-images" {
+            "Inspection only; cacheferret docker clean --unused-images".to_owned()
         } else {
             "Inspection only".to_owned()
         };
@@ -2296,6 +2309,9 @@ fn render_details(frame: &mut Frame, area: Rect, app: &App) {
         && let Some(description) = candidate_description(&candidate.kind)
     {
         lines.push(labeled("About", description.to_owned(), palette));
+    }
+    if let Some(note) = &candidate.protection_note {
+        lines.push(labeled("Safe", note.clone(), palette));
     }
     lines.extend([
         labeled("Restore", restore.to_owned(), palette),
@@ -3821,6 +3837,50 @@ mod tests {
         assert_eq!(dumb.palette, Palette::PLAIN);
         assert!(!dumb.unicode);
         assert!(!dumb.animate);
+    }
+
+    #[test]
+    fn a_protection_note_drops_the_recent_risk_and_shows_in_the_inspector() {
+        let (_temp, _target, mut app) = project_app();
+        let mut candidate = app.candidates[0].clone();
+        candidate.age_days = Some(0);
+        candidate.bytes = 1;
+        assert!(risk_reasons(&candidate).contains(&"recent"));
+
+        candidate.protection_note = Some("the next build recreates it".to_owned());
+        assert!(!risk_reasons(&candidate).contains(&"recent"));
+        candidate.age_days = None;
+        assert!(
+            risk_reasons(&candidate).contains(&"unknown age"),
+            "a note does not vouch for an unknown age"
+        );
+
+        app.candidates[0].protection_note = Some("the next build recreates it".to_owned());
+        let output = render_text(&mut app, 120, 30);
+        assert!(output.contains("the next build recreates it"), "{output}");
+    }
+
+    #[test]
+    fn the_images_row_points_to_the_cli_removal() {
+        let resource = |kind: &str| NativeResource {
+            provider: "docker".to_owned(),
+            scope: "daemon".to_owned(),
+            kind: kind.to_owned(),
+            label: kind.to_owned(),
+            total_count: 1,
+            active_count: 0,
+            bytes: 1,
+            reclaimable_bytes: 1,
+            cleanable: false,
+        };
+        assert!(
+            inspection_only_message(&resource("docker-images"), "")
+                .contains("cacheferret docker clean --unused-images")
+        );
+        assert_eq!(
+            inspection_only_message(&resource("docker-volumes"), ""),
+            "This Docker resource is inspection-only"
+        );
     }
 
     #[test]

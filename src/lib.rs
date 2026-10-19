@@ -19,12 +19,16 @@ mod simulator;
 
 pub use catalog::{catalog, default_roots};
 pub use cleaner::clean_candidates;
-pub use docker::{inspect_docker, preview_docker_build_cache, prune_docker_build_cache};
+pub use docker::{
+    inspect_docker, preview_docker_build_cache, preview_unused_docker_images,
+    prune_docker_build_cache, remove_unused_docker_images,
+};
 pub use error::Error;
 pub use model::{
     CacheCandidate, CacheScope, CatalogEntry, CleanReport, CleanTarget, DiscoveredCache,
-    DiscoveryEvent, DiscoveryOptions, FilesystemSpaceDelta, NativeCleanReport, NativeDiagnostic,
-    NativeReport, NativeResource, NativeTrim, OutputFormat, ScanReport, ScopeFilter,
+    DiscoveryEvent, DiscoveryOptions, DockerImage, FilesystemSpaceDelta, NativeCleanReport,
+    NativeDiagnostic, NativeReport, NativeResource, NativeTrim, OutputFormat, ScanReport,
+    ScopeFilter, SkippedImage, UnusedDockerImages, outermost, unique_image_bytes,
 };
 pub use scanner::{
     discover, discover_with_progress, discover_with_progress_prioritized, refresh_candidate,

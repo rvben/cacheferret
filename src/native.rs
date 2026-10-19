@@ -50,6 +50,9 @@ pub(crate) struct Planned {
     pub network_restore: bool,
     /// False when the owning tool says the entry cannot be removed.
     pub cleanable: bool,
+    /// Set when the entry is safe to clean whatever its age says, with the
+    /// reason shown to the user.
+    pub unprotected_because: Option<String>,
     pub sizing: Sizing,
 }
 
@@ -197,7 +200,7 @@ pub(crate) fn discover_with_progress(
             let path = item.path.clone();
             let measured = measure(item, protect_days, now);
             match &measured {
-                Some(candidate) => progress(DiscoveryEvent::Measured(candidate.clone())),
+                Some(candidate) => progress(DiscoveryEvent::Measured(Box::new(candidate.clone()))),
                 None => progress(DiscoveryEvent::Skipped { path }),
             }
             measured
@@ -267,7 +270,9 @@ pub(crate) fn measure(planned: Planned, protect_days: u64, now: u64) -> Option<C
         allocated_bytes,
         modified_unix: last_used_unix,
         age_days,
-        protected: age_days.is_none_or(|days| days < protect_days),
+        protected: planned.unprotected_because.is_none()
+            && age_days.is_none_or(|days| days < protect_days),
+        protection_note: planned.unprotected_because,
         network_restore: planned.network_restore,
         cleanable: planned.cleanable,
         identity,
@@ -316,7 +321,7 @@ fn newest_file_use_unix(root: &Path) -> Option<u64> {
 
 /// Whether a simulator device has at least one installed app. A device without
 /// one is a pristine Xcode destination that holds nothing to reclaim.
-fn has_installed_apps(device: &Path) -> bool {
+pub(crate) fn has_installed_apps(device: &Path) -> bool {
     fs::read_dir(device.join("data/Containers/Bundle/Application"))
         .ok()
         .and_then(|mut entries| entries.next())
@@ -414,6 +419,7 @@ mod tests {
             label: None,
             network_restore: true,
             cleanable: true,
+            unprotected_because: None,
             sizing: Sizing::Tree {
                 age: AgeSignal::FileUse,
                 minimum_bytes,
@@ -479,6 +485,7 @@ mod tests {
             label: Some("iOS 26.5 (23F77)".to_owned()),
             network_restore: true,
             cleanable,
+            unprotected_because: None,
             sizing: Sizing::Reported {
                 bytes: 8_000_000_000,
                 last_used_unix,

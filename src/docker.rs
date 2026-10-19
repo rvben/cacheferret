@@ -7,13 +7,17 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::colima;
-use crate::{NativeCleanReport, NativeDiagnostic, NativeReport, NativeResource};
+use crate::{
+    DockerImage, NativeCleanReport, NativeDiagnostic, NativeReport, NativeResource, SkippedImage,
+    UnusedDockerImages,
+};
 
 const PROVIDER: &str = "docker";
 // Large inventories and VM-backed daemons can take well over five seconds.
 // The TUI runs this independently of filesystem discovery and interaction.
 const INSPECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(120);
+const IMAGE_REMOVAL_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
@@ -176,8 +180,229 @@ pub fn prune_docker_build_cache() -> Result<NativeCleanReport, NativeDiagnostic>
         reported_reclaimed_bytes,
         estimated_removed_bytes,
         trim,
+        images: Vec::new(),
+        removed_images: Vec::new(),
+        skipped_images: Vec::new(),
         diagnostics,
     })
+}
+
+/// List the tagged images that no container, running or stopped, was created
+/// from, together with the `Images` storage class they belong to.
+pub fn preview_unused_docker_images() -> Result<UnusedDockerImages, NativeDiagnostic> {
+    let resource = images_resource()?;
+    let (images, diagnostics) = list_images()?;
+    Ok(UnusedDockerImages {
+        resource,
+        images: images.into_iter().filter_map(ListedImage::unused).collect(),
+        diagnostics,
+    })
+}
+
+/// Remove the confirmed images that are still unused, one `docker image rm`
+/// per reference and never with `--force`, so Docker itself refuses an image
+/// a container started using in the meantime. An image whose reference now
+/// names a different image, or that a container uses, is kept and reported.
+/// Containers, volumes and untagged images are never touched.
+pub fn remove_unused_docker_images(
+    confirmed: &[DockerImage],
+) -> Result<NativeCleanReport, NativeDiagnostic> {
+    let before = images_resource()?;
+    let (current, mut diagnostics) = list_images()?;
+    let (removed_images, skipped_images) = remove_still_unused(confirmed, &current, |reference| {
+        let output = run_docker_command(
+            &["image", "rm", "--", reference],
+            IMAGE_REMOVAL_TIMEOUT,
+            "image removal",
+        )
+        .map_err(|diagnostic| diagnostic.message)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(command_failure("image removal", &output).message)
+        }
+    });
+
+    let trim = if removed_images.is_empty() {
+        None
+    } else {
+        match colima::trim_after_prune() {
+            Some(Ok(trim)) => Some(trim),
+            Some(Err(diagnostic)) => {
+                diagnostics.push(diagnostic);
+                None
+            }
+            None => None,
+        }
+    };
+    let after = match images_resource() {
+        Ok(resource) => Some(resource),
+        Err(diagnostic) => {
+            diagnostics.push(diagnostic);
+            None
+        }
+    };
+    let estimated_removed_bytes = after
+        .as_ref()
+        .map_or(0, |resource| before.bytes.saturating_sub(resource.bytes));
+
+    Ok(NativeCleanReport {
+        provider: PROVIDER.to_owned(),
+        kind: before.kind.clone(),
+        changed: !removed_images.is_empty(),
+        dry_run: false,
+        confirmed: true,
+        before,
+        after,
+        reported_reclaimed_bytes: None,
+        estimated_removed_bytes,
+        trim,
+        images: confirmed.to_vec(),
+        removed_images,
+        skipped_images,
+        diagnostics,
+    })
+}
+
+/// Run `remove` for each confirmed image that the current listing still shows
+/// under the same reference and ID with no container, and return the removed
+/// references and the kept images with their reasons.
+fn remove_still_unused(
+    confirmed: &[DockerImage],
+    current: &[ListedImage],
+    mut remove: impl FnMut(&str) -> Result<(), String>,
+) -> (Vec<String>, Vec<SkippedImage>) {
+    let mut removed = Vec::new();
+    let mut skipped = Vec::new();
+    for image in confirmed {
+        let listed = current
+            .iter()
+            .find(|listed| listed.image.reference == image.reference);
+        let outcome = match listed {
+            None => Err("no longer present".to_owned()),
+            Some(listed) if listed.image.id != image.id => {
+                Err("the reference now names a different image".to_owned())
+            }
+            Some(listed) if listed.containers != Some(0) => {
+                Err("a container now uses this image".to_owned())
+            }
+            Some(_) => remove(&image.reference),
+        };
+        match outcome {
+            Ok(()) => removed.push(image.reference.clone()),
+            Err(reason) => skipped.push(SkippedImage {
+                reference: image.reference.clone(),
+                reason,
+            }),
+        }
+    }
+    (removed, skipped)
+}
+
+fn images_resource() -> Result<NativeResource, NativeDiagnostic> {
+    let report = inspect_docker();
+    if !report.available {
+        return Err(report.diagnostics.into_iter().next().unwrap_or_else(|| {
+            diagnostic(
+                "unavailable",
+                "Docker images could not be inspected".to_owned(),
+                true,
+            )
+        }));
+    }
+    report
+        .resources
+        .into_iter()
+        .find(|resource| resource.kind == "docker-images")
+        .ok_or_else(|| {
+            diagnostic(
+                "missing_class",
+                "Docker did not report image storage".to_owned(),
+                false,
+            )
+        })
+}
+
+/// A tagged image with the number of containers created from it; `None` when
+/// Docker's count could not be read, which never counts as unused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListedImage {
+    image: DockerImage,
+    containers: Option<u64>,
+}
+
+impl ListedImage {
+    fn unused(self) -> Option<DockerImage> {
+        (self.containers == Some(0)).then_some(self.image)
+    }
+}
+
+fn list_images() -> Result<(Vec<ListedImage>, Vec<NativeDiagnostic>), NativeDiagnostic> {
+    let output = run_docker_command(
+        &["system", "df", "--verbose", "--format", "json"],
+        INSPECTION_TIMEOUT,
+        "image inspection",
+    )?;
+    if !output.status.success() {
+        return Err(command_failure("image inspection", &output));
+    }
+    parse_images(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|message| diagnostic("invalid_output", message, false))
+}
+
+/// Read the `Images` array of `docker system df --verbose --format json`.
+/// Untagged images are left out: they have no reference to remove them by,
+/// and `docker image prune` is the tool for them.
+fn parse_images(json: &str) -> Result<(Vec<ListedImage>, Vec<NativeDiagnostic>), String> {
+    let value: Value =
+        serde_json::from_str(json).map_err(|error| format!("invalid JSON ({error})"))?;
+    let rows = value
+        .get("Images")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Images is missing or not a list".to_owned())?;
+    let mut images = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let object = row
+            .as_object()
+            .ok_or_else(|| format!("image {} is not a JSON object", index + 1))?;
+        let repository = text_field(object, "Repository")?;
+        let tag = text_field(object, "Tag")?;
+        if repository == "<none>" || tag == "<none>" || repository.is_empty() || tag.is_empty() {
+            continue;
+        }
+        let reference = format!("{repository}:{tag}");
+        let containers = integer_field(object, "Containers").ok();
+        if containers.is_none() {
+            diagnostics.push(diagnostic(
+                "invalid_output",
+                format!("Docker did not report how many containers use {reference}; it is kept"),
+                false,
+            ));
+        }
+        images.push(ListedImage {
+            image: DockerImage {
+                reference,
+                id: text_field(object, "ID")?.to_owned(),
+                bytes: size_field(object, "Size")?,
+                unique_bytes: size_field(object, "UniqueSize")?,
+                created: object
+                    .get("CreatedSince")
+                    .and_then(Value::as_str)
+                    .filter(|created| !created.is_empty())
+                    .map(str::to_owned),
+            },
+            containers,
+        });
+    }
+    images.sort_by(|left, right| {
+        right
+            .image
+            .unique_bytes
+            .cmp(&left.image.unique_bytes)
+            .then_with(|| left.image.reference.cmp(&right.image.reference))
+    });
+    Ok((images, diagnostics))
 }
 
 struct ProcessOutput {
@@ -597,6 +822,161 @@ mod tests {
             Some(2 * 1024 * 1024)
         );
         assert_eq!(parse_reclaimed_bytes(b"prune complete\n"), None);
+    }
+
+    fn image_row(repository: &str, tag: &str, id: &str, containers: &str, unique: &str) -> String {
+        format!(
+            r#"{{"Containers":"{containers}","CreatedAt":"2026-10-13 19:53:14 +0200 CEST","CreatedSince":"5 days ago","Digest":"","ID":"{id}","Repository":"{repository}","SharedSize":"12.93MB","Size":"361MB","Tag":"{tag}","UniqueSize":"{unique}"}}"#
+        )
+    }
+
+    fn images_json(rows: &[String]) -> String {
+        format!(
+            r#"{{"Images":[{}],"Containers":[],"Volumes":[],"BuildCache":[]}}"#,
+            rows.join(",")
+        )
+    }
+
+    fn unused(json: &str) -> Vec<DockerImage> {
+        let (images, _) = parse_images(json).unwrap();
+        images.into_iter().filter_map(ListedImage::unused).collect()
+    }
+
+    #[test]
+    fn lists_tagged_images_no_container_uses_largest_first() {
+        let json = images_json(&[
+            image_row(
+                "registry.example/app",
+                "latest",
+                "sha256:bb",
+                "0",
+                "347.8MB",
+            ),
+            image_row("golang", "1.26", "sha256:aa", "0", "1.302GB"),
+            image_row("postgres", "17", "sha256:cc", "2", "400MB"),
+        ]);
+
+        assert_eq!(
+            unused(&json),
+            vec![
+                DockerImage {
+                    reference: "golang:1.26".to_owned(),
+                    id: "sha256:aa".to_owned(),
+                    bytes: 361_000_000,
+                    unique_bytes: 1_302_000_000,
+                    created: Some("5 days ago".to_owned()),
+                },
+                DockerImage {
+                    reference: "registry.example/app:latest".to_owned(),
+                    id: "sha256:bb".to_owned(),
+                    bytes: 361_000_000,
+                    unique_bytes: 347_800_000,
+                    created: Some("5 days ago".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn untagged_images_and_unreadable_container_counts_are_never_unused() {
+        let json = images_json(&[
+            image_row("<none>", "<none>", "sha256:aa", "0", "1GB"),
+            image_row("app", "<none>", "sha256:bb", "0", "1GB"),
+            image_row("app", "v1", "sha256:cc", "N/A", "1GB"),
+            image_row("app", "v2", "sha256:dd", "0", "1GB"),
+        ]);
+
+        let (images, diagnostics) = parse_images(&json).unwrap();
+        let unused = images
+            .into_iter()
+            .filter_map(ListedImage::unused)
+            .map(|image| image.reference)
+            .collect::<Vec<_>>();
+
+        assert_eq!(unused, ["app:v2"]);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("app:v1"), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn rejects_image_listings_it_cannot_read() {
+        assert!(parse_images("not json").is_err());
+        assert!(parse_images(r#"{"Containers":[]}"#).is_err());
+        let bad_size = images_json(&[image_row("app", "v1", "sha256:aa", "0", "huge")]);
+        assert!(parse_images(&bad_size).is_err());
+    }
+
+    #[test]
+    fn unique_bytes_count_each_image_id_once() {
+        let json = images_json(&[
+            image_row("app", "v1", "sha256:aa", "0", "100MB"),
+            image_row("app", "latest", "sha256:aa", "0", "100MB"),
+            image_row("tool", "1", "sha256:bb", "0", "50MB"),
+        ]);
+        assert_eq!(crate::unique_image_bytes(&unused(&json)), 150_000_000);
+    }
+
+    fn listed(reference: &str, id: &str, containers: Option<u64>) -> ListedImage {
+        ListedImage {
+            image: DockerImage {
+                reference: reference.to_owned(),
+                id: id.to_owned(),
+                bytes: 1,
+                unique_bytes: 1,
+                created: None,
+            },
+            containers,
+        }
+    }
+
+    #[test]
+    fn removes_only_confirmed_images_that_are_still_unused_and_unchanged() {
+        let confirmed = [
+            listed("kept:v1", "sha256:aa", Some(0)).image,
+            listed("retagged:v1", "sha256:bb", Some(0)).image,
+            listed("started:v1", "sha256:cc", Some(0)).image,
+            listed("gone:v1", "sha256:dd", Some(0)).image,
+            listed("unreadable:v1", "sha256:ee", Some(0)).image,
+            listed("refused:v1", "sha256:ff", Some(0)).image,
+        ];
+        let current = [
+            listed("kept:v1", "sha256:aa", Some(0)),
+            listed("retagged:v1", "sha256:b2", Some(0)),
+            listed("started:v1", "sha256:cc", Some(1)),
+            listed("unreadable:v1", "sha256:ee", None),
+            listed("refused:v1", "sha256:ff", Some(0)),
+            listed("new:v1", "sha256:99", Some(0)),
+        ];
+        let mut asked = Vec::new();
+
+        let (removed, skipped) = remove_still_unused(&confirmed, &current, |reference| {
+            asked.push(reference.to_owned());
+            if reference == "refused:v1" {
+                Err("conflict: unable to remove repository reference".to_owned())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(asked, ["kept:v1", "refused:v1"], "only these reach docker");
+        assert_eq!(removed, ["kept:v1"]);
+        let reasons = skipped
+            .iter()
+            .map(|image| (image.reference.as_str(), image.reason.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            [
+                ("retagged:v1", "the reference now names a different image"),
+                ("started:v1", "a container now uses this image"),
+                ("gone:v1", "no longer present"),
+                ("unreadable:v1", "a container now uses this image"),
+                (
+                    "refused:v1",
+                    "conflict: unable to remove repository reference"
+                ),
+            ]
+        );
     }
 
     #[test]

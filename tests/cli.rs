@@ -669,11 +669,152 @@ fn schema_describes_guarded_docker_clean() {
     assert_eq!(command["name"], "docker clean");
     assert_eq!(command["mutating"], true);
     assert_eq!(command["confirmation_bypass_arg"], "--yes");
+    let description = command["description"].as_str().unwrap();
+    assert!(description.contains("--unused-images"), "{description}");
     assert!(
-        command["description"]
+        description.contains("Never removes containers, volumes, untagged images"),
+        "{description}"
+    );
+    let args = command["args"].as_array().unwrap();
+    assert!(args.iter().any(|arg| arg["name"] == "--unused-images"));
+    let fields = command["output_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for field in ["images", "removed_images", "skipped_images"] {
+        assert!(fields.contains(&field), "{field} missing from {fields:?}");
+    }
+}
+
+/// A fake Docker CLI with five images: two unused, one Docker refuses to
+/// remove, one retagged to a different image between the first and second
+/// listing, one used by a container, and one untagged.
+#[cfg(unix)]
+fn docker_images_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let docker = temp.path().join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+row() {
+  printf '{"Containers":"%s","CreatedSince":"5 days ago","ID":"%s","Repository":"%s","Size":"%s","Tag":"%s","UniqueSize":"%s"}' "$1" "$2" "$3" "$4" "$5" "$6"
+}
+case "$1 $2 $3" in
+  "system df --verbose")
+    printf x >> "$CACHEFERRET_TEST_STATE"
+    retag=sha256:cc
+    read -r seen < "$CACHEFERRET_TEST_STATE"
+    [ "$seen" = x ] || retag=sha256:dd
+    printf '{"Images":['
+    row 0 sha256:aa app 300MB 1 300MB; printf ,
+    row 0 sha256:ee tool 100MB 2 100MB; printf ,
+    row 0 sha256:bb busy 200MB 1 200MB; printf ,
+    row 0 "$retag" retag 150MB 1 150MB; printf ,
+    row 1 sha256:ff used 500MB 1 500MB; printf ,
+    row 0 sha256:99 '<none>' 50MB '<none>' 50MB
+    printf '],"Containers":[],"Volumes":[],"BuildCache":[]}\n'
+    ;;
+  "system df --format")
+    printf '%s\n' '{"Type":"Images","TotalCount":"6","Active":"1","Size":"1.3GB","Reclaimable":"800MB (61%)"}'
+    printf '%s\n' '{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}'
+    ;;
+  "image rm --")
+    printf '%s\n' "$4" >> "$CACHEFERRET_TEST_LOG"
+    if [ "$4" = busy:1 ]; then
+      printf '%s\n' 'Error response from daemon: conflict: unable to remove repository reference "busy:1"' >&2
+      exit 1
+    fi
+    printf 'Untagged: %s\n' "$4"
+    ;;
+  *)
+    printf '%s\n' "unexpected docker invocation: $*" >&2
+    exit 42
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+    let state = temp.path().join("listings");
+    let log = temp.path().join("removed");
+    (temp, state, log)
+}
+
+#[test]
+#[cfg(unix)]
+fn unused_images_dry_run_lists_them_and_removes_nothing() {
+    let (temp, state, log) = docker_images_fixture();
+    let out = run_docker_clean(
+        &["docker", "clean", "--unused-images", "--dry-run"],
+        &temp,
+        &state,
+        &log,
+    );
+
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(!log.exists(), "a dry run never runs docker image rm");
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["kind"], "docker-images");
+    assert_eq!(value["dry_run"], true);
+    assert_eq!(value["changed"], false);
+    let references = value["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|image| image["reference"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(references, ["app:1", "busy:1", "retag:1", "tool:2"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn unused_images_need_confirmation_without_a_tty() {
+    let (temp, state, log) = docker_images_fixture();
+    let out = run_docker_clean(&["docker", "clean", "--unused-images"], &temp, &state, &log);
+
+    assert_eq!(out.code, 6, "stdout: {}", out.stdout);
+    assert_eq!(error_envelope(&out.stderr)["kind"], "confirmation_required");
+    assert!(!log.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn confirmed_removal_keeps_refused_and_changed_images() {
+    let (temp, state, log) = docker_images_fixture();
+    let out = run_docker_clean(
+        &["docker", "clean", "--unused-images", "--yes"],
+        &temp,
+        &state,
+        &log,
+    );
+
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "app:1\nbusy:1\ntool:2\n",
+        "only images still unused and unchanged reach docker image rm"
+    );
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["changed"], true);
+    assert_eq!(
+        value["removed_images"],
+        serde_json::json!(["app:1", "tool:2"])
+    );
+    let skipped = value["skipped_images"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(skipped[0]["reference"], "busy:1");
+    assert!(
+        skipped[0]["reason"]
             .as_str()
             .unwrap()
-            .contains("Never prunes images")
+            .contains("unable to remove repository reference")
+    );
+    assert_eq!(skipped[1]["reference"], "retag:1");
+    assert_eq!(
+        skipped[1]["reason"],
+        "the reference now names a different image"
     );
 }
 
@@ -1419,7 +1560,14 @@ fn simulator_runtimes_report_the_native_size_and_unknown_use() {
     assert_eq!(never_used["bytes"], 4_000_000_000_u64);
     assert!(never_used["modified_unix"].is_null());
     assert!(never_used["age_days"].is_null());
-    assert_eq!(never_used["protected"], true);
+    assert_eq!(
+        never_used["protected"], false,
+        "an unknown age would protect it, but watchOS 26.5 supersedes it"
+    );
+    assert_eq!(
+        never_used["protection_note"],
+        "superseded by watchOS 26.5; no simulator device uses it"
+    );
 
     assert_eq!(find("watchOS 26.5 (23T570)")["cleanable"], false);
 }

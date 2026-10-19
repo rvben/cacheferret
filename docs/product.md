@@ -109,8 +109,10 @@ filesystem cleanup. A timeout is labeled explicitly and can be retried with
 Images, containers, volumes, and build cache appear after filesystem cache rows, ordered by
 Docker-reported reclaimable bytes. They use daemon scope, never fake paths,
 and always keep their action visible in compact layouts. Ordinary build cache
-is the only selectable Docker resource; images, containers, volumes, and
-broader internal/frontend build records remain inspection-only. Build-cache
+is the only selectable Docker resource in the TUI; images, containers,
+volumes, and broader internal/frontend build records are inspection-only
+there. The images row points to `cacheferret docker clean --unused-images`,
+whose confirmation must list each image by name and size. Build-cache
 cleanup always requires confirmation, refreshes Docker's estimate before the
 prompt and immediately before mutation, and runs only
 `docker builder prune --force` without `--all`. Mixed filesystem and
@@ -175,6 +177,25 @@ downloads. It always asks once, even for a small estimate. The CLI equivalent
 is `cacheferret docker clean`; non-interactive callers must use `--yes`, and
 agents can preview the same output contract with `--dry-run`.
 
+Unused-image removal (`docker clean --unused-images`) is CLI-only and never
+batched with anything else. It covers tagged images whose Docker-reported
+container count is zero; an unreadable count keeps the image. The prompt lists
+every image and says that each must be downloaded or rebuilt before use. Each
+confirmed image is checked against a fresh listing immediately before removal
+(same reference, same ID, still no container), and a changed or refused image
+is reported as kept with its reason.
+
+Age protection exists because recent use signals value. Two kinds are exempt
+because that signal does not hold, and the exemption is always shown as a
+reason rather than applied silently:
+
+- Cargo incremental caches. They only speed up the next build of the same
+  code, so removing one never changes a build's result. Removal holds Cargo's
+  own build locks for the profile and is refused while a build holds them.
+- Simulator runtimes superseded by a strictly newer installed runtime for the
+  same platform, when every device on the old runtime is shut down, has a
+  trusted data path, and holds no installed apps.
+
 ### Product boundaries
 
 In scope:
@@ -189,7 +210,8 @@ In scope:
   rapid batch selection.
 - Safe preview and cleanup for scripts.
 - Docker storage inspection plus guarded ordinary build-cache pruning in the
-  TUI, text output, and JSON.
+  TUI, text output, and JSON, and guarded removal of unused tagged images from
+  the CLI.
 - Tool-owned cleanup through the owning tool, never through file deletion:
   unused rustup toolchains (`rustup toolchain uninstall`), shut-down Xcode
   simulator devices (`xcrun simctl delete`), and deletable Xcode simulator
@@ -205,8 +227,9 @@ Out of scope unless deliberately designed later:
 - Implicitly or batch-selecting state that may be the only copy of user-created
   artifacts.
 - Treating arbitrary system-temporary contents as caches.
-- Treating Docker storage as ordinary directories; pruning images, containers,
-  volumes, or internal/frontend build records; or running broad system prune.
+- Treating Docker storage as ordinary directories; removing untagged images,
+  containers, volumes, or internal/frontend build records; or running broad
+  system or image prune.
 - Claiming Windows support before discovery rules, terminal behavior, tests,
   and packaging are intentionally supported.
 
@@ -299,7 +322,8 @@ successful build.
 - Continue polishing navigation, focus continuity, responsive terminal
   layouts, copy, and visual identity based on real terminal use.
 - Evaluate whether any additional native cleanup class can be bounded as
-  precisely as Docker's ordinary build cache or the rustup and simulator kinds; keep images, containers, and
-  volumes inspection-only until that evidence exists.
+  precisely as Docker's ordinary build cache and unused images or the rustup
+  and simulator kinds; keep containers and volumes inspection-only until that
+  evidence exists.
 - Consider Windows only as a complete platform effort, not merely another
   wheel target.

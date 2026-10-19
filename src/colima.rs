@@ -20,9 +20,9 @@ const DOCKER_DATA_DIR: &str = "/var/lib/docker";
 const INSPECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const TRIM_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Trim the Docker data disk when the active Docker endpoint is managed by
-/// Colima. `None` means the endpoint is not Colima (or could not be
-/// determined) and no trim applies.
+/// Trim the Docker data disk after a prune or image removal when the active
+/// Docker endpoint is managed by Colima. `None` means the endpoint is not
+/// Colima (or could not be determined) and no trim applies.
 pub(crate) fn trim_after_prune() -> Option<Result<NativeTrim, NativeDiagnostic>> {
     let profile = active_profile()?;
     Some(trim(&profile))
@@ -124,7 +124,7 @@ fn failure(message: &str, retryable: bool) -> NativeDiagnostic {
         provider: PROVIDER.to_owned(),
         kind: "trim_failed".to_owned(),
         message: process::sanitize_message(&format!(
-            "The build cache was pruned, but returning the freed space to the host failed: {message}"
+            "Docker data was removed, but returning the freed space to the host failed: {message}"
         )),
         retryable,
     }
@@ -222,6 +222,10 @@ mod tests {
         assert_eq!(diagnostic.provider, "colima");
         assert_eq!(diagnostic.kind, "trim_failed");
         assert!(diagnostic.retryable);
-        assert!(diagnostic.message.contains("was pruned"));
+        assert!(
+            diagnostic
+                .message
+                .starts_with("Docker data was removed, but returning the freed space")
+        );
     }
 }

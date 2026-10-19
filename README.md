@@ -54,6 +54,10 @@ cacheferret docker clean --dry-run
 # Confirm Docker build-cache cleanup from a script or agent
 cacheferret docker clean --yes
 
+# List tagged images that no container uses, then remove them after confirmation
+cacheferret docker clean --unused-images --dry-run
+cacheferret docker clean --unused-images
+
 # Preview old project caches that are eligible for cleanup
 cacheferret clean --root ~/Projects --dry-run
 
@@ -76,7 +80,9 @@ Catalog entries marked scan-only are excluded from focused deletion, `a` batch
 selection, and CLI cleanup. Select one individually with `Space` to request a
 manual override; `d` then requires confirmation and repeats the safety checks.
 Docker build cache participates in the same selection model and always asks for
-confirmation. Docker images, containers, and volumes remain inspection-only.
+confirmation. Docker images, containers, and volumes are inspection-only in
+the TUI; unused tagged images are removed with
+`cacheferret docker clean --unused-images`.
 Docker inspection runs in the background with a 60-second limit. The TUI shows
 “Checking Docker storage…” while you continue browsing and deleting filesystem
 caches; if the inspection times out, press `r` to retry.
@@ -117,6 +123,11 @@ cacheferret docker --fields kind,reclaimable_bytes |
   `--scope global` or `--scope all`.
 - The batch `clean` command protects caches modified in the last seven days
   unless `--include-recent` is passed. Change the window with `--protect-days`.
+  Two kinds are exempt because their age does not signal value, and scan output
+  says why for each: Cargo incremental caches (the next build recreates them,
+  and removal is refused while a Cargo build holds the target's lock) and
+  simulator runtimes superseded by a newer runtime for the same platform whose
+  devices are all shut down and hold no apps.
 - A non-interactive clean refuses to run without `--yes` and exits with the
   declared `confirmation_required` error.
 - Cache roots must match a closed catalog and their project ownership markers.
@@ -142,7 +153,12 @@ cacheferret docker --fields kind,reclaimable_bytes |
   build cache is selectable. Cleanup refreshes the estimate before confirmation
   and again before mutation, then runs exactly `docker builder prune --force`.
   CacheFerret never adds `--all`, never runs `docker system prune`, and never
-  prunes images, containers, or volumes.
+  removes containers or volumes.
+- `docker clean --unused-images` lists every tagged image that no container
+  uses, with its size, and asks once. Before each removal the image is checked
+  again: it must still carry the same ID and still have no container. Each
+  removal is a plain `docker image rm` without `--force`, so Docker itself
+  refuses an image that is still referenced. Untagged images are never removed.
 
 CacheFerret reports storage in three deliberately separate layers:
 
@@ -173,7 +189,7 @@ release covers:
 
 | ecosystem | project caches | shared caches |
 | --- | --- | --- |
-| Rust | Cargo `target/` | Cargo registry and git checkouts, and each installed rustup toolchain that is not the default, an override or `RUSTUP_TOOLCHAIN` (removed with `rustup toolchain uninstall`) |
+| Rust | Cargo `target/`, and the incremental compilation cache inside it | Cargo registry and git checkouts, and each installed rustup toolchain that is not the default, an override or `RUSTUP_TOOLCHAIN` (removed with `rustup toolchain uninstall`) |
 | Python | virtualenvs, bytecode, pytest, mypy, Ruff, tox, nox | pip, uv, and pre-commit/prek |
 | JavaScript | `node_modules` | npm, pnpm, Bun, Deno, and Playwright |
 | Go | — | compiler and module caches |
@@ -181,7 +197,7 @@ release covers:
 | .NET | `bin/`, `obj/` | NuGet packages |
 | Ruby/PHP | Bundler and Composer dependencies | RubyGems and Composer caches |
 | Swift | SwiftPM `.build/` | SwiftPM caches and Xcode DerivedData |
-| Xcode | — | iOS, watchOS, tvOS, and visionOS DeviceSupport symbols, one entry per device and OS build; shut-down simulator devices that have installed apps (removed with `xcrun simctl delete`); simulator runtimes that `simctl` reports as deletable and no booted device uses (removed with `xcrun simctl runtime delete`) |
+| Xcode | — | iOS, watchOS, tvOS, and visionOS DeviceSupport symbols, one entry per device and OS build; shut-down simulator devices that have installed apps (removed with `xcrun simctl delete`); simulator runtimes that `simctl` reports as deletable and no booted device uses (removed with `xcrun simctl runtime delete`), unprotected regardless of age once a newer runtime for the same platform is installed and the old one's devices are all shut down and hold no apps |
 | C/C++ | verified CMake build trees | ccache |
 | Zig/Dart/Elixir | project build and dependency state | Zig, pub, and Hex caches |
 | Haskell | Stack and Cabal project output | Stack and Cabal stores |
@@ -192,9 +208,9 @@ release covers:
 Docker build data is intentionally not treated as a directory cache.
 `cacheferret docker` uses `docker system df` to report images, containers,
 volumes, and build cache as distinct native resources. The TUI shows the same
-daemon-scoped rows when global storage is in scope. Ordinary build cache alone
-can be selected and pruned; every prune gets a fresh preview and explicit
-confirmation. The bounded adapter contract and native cleanup opportunities for
+daemon-scoped rows when global storage is in scope. Ordinary build cache can be
+selected and pruned, and unused tagged images can be removed from the CLI;
+every removal gets a fresh preview and explicit confirmation. The bounded adapter contract and native cleanup opportunities for
 other package managers are documented in
 [docs/native-cleanup.md](docs/native-cleanup.md).
 
@@ -221,7 +237,7 @@ remain protected unless `--include-recent` is supplied.
 | `cacheferret tui` | Open the interactive browser with optional discovery filters |
 | `cacheferret scan` | Scan with root, scope, kind, pagination, and field controls |
 | `cacheferret docker` | Inspect Docker storage with pagination and field controls |
-| `cacheferret docker clean` | Preview or confirm bounded ordinary build-cache pruning |
+| `cacheferret docker clean` | Preview or confirm bounded ordinary build-cache pruning, or with `--unused-images` the removal of tagged images no container uses |
 | `cacheferret clean` | Preview or clean eligible caches |
 | `cacheferret catalog` | List supported cache kinds with pagination and field controls |
 | `cacheferret schema [path]` | Print or narrow the clispec.dev v0.3 contract |

@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::catalog::{GlobalPath, global_paths, identify_project_cache};
+use crate::catalog::{GlobalPath, ProjectKind, global_paths, identify_project_cache};
 use crate::model::{FileIdentity, TreeFingerprint};
 use crate::{
     CacheCandidate, CacheScope, DiscoveredCache, DiscoveryEvent, DiscoveryOptions, Error,
@@ -196,7 +196,7 @@ where
             scope.spawn(move |_| {
                 let path = raw.path.clone();
                 if let Some(candidate) = measure_candidate(raw, options.protect_days, now) {
-                    progress(DiscoveryEvent::Measured(candidate.clone()));
+                    progress(DiscoveryEvent::Measured(Box::new(candidate.clone())));
                     candidates
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -415,18 +415,7 @@ fn scan_project_root<F>(
             continue;
         }
         if let Some(found) = identify_project_cache(path) {
-            if wants_kind(found.kind) {
-                raw.push(RawCandidate {
-                    kind: found.kind.to_owned(),
-                    ecosystem: found.ecosystem.to_owned(),
-                    scope: CacheScope::Project,
-                    path: path.to_path_buf(),
-                    anchor: root.to_path_buf(),
-                    network_restore: found.network_restore,
-                    cleanable: true,
-                    minimum_bytes: 0,
-                });
-            }
+            raw.extend(project_candidates(path, found, root, wants_kind));
             walker.skip_current_dir();
         }
     }
@@ -463,22 +452,97 @@ fn scan_project_root_progressive<F, W>(
             continue;
         }
         if let Some(found) = identify_project_cache(path) {
-            if wants_kind(found.kind) {
-                on_candidate(RawCandidate {
-                    kind: found.kind.to_owned(),
-                    ecosystem: found.ecosystem.to_owned(),
-                    scope: CacheScope::Project,
-                    path: path.to_path_buf(),
-                    anchor: root.to_path_buf(),
-                    network_restore: found.network_restore,
-                    cleanable: true,
-                    minimum_bytes: 0,
-                });
+            for candidate in project_candidates(path, found, root, wants_kind) {
+                on_candidate(candidate);
             }
             walker.skip_current_dir();
         }
     }
 }
+
+/// The wanted caches a recognized project cache yields: the cache itself and,
+/// for a Cargo target directory, the incremental caches inside it. The walk
+/// never descends into a recognized cache, so nested kinds are found here.
+fn project_candidates<F>(
+    path: &Path,
+    found: ProjectKind,
+    root: &Path,
+    wants_kind: &F,
+) -> Vec<RawCandidate>
+where
+    F: Fn(&str) -> bool,
+{
+    let candidate = |path: PathBuf, found: ProjectKind| RawCandidate {
+        kind: found.kind.to_owned(),
+        ecosystem: found.ecosystem.to_owned(),
+        scope: CacheScope::Project,
+        path,
+        anchor: root.to_path_buf(),
+        network_restore: found.network_restore,
+        cleanable: true,
+        minimum_bytes: 0,
+    };
+    let mut candidates = Vec::new();
+    if wants_kind(found.kind) {
+        candidates.push(candidate(path.to_path_buf(), found));
+    }
+    if found.kind == "cargo-target" && wants_kind("cargo-incremental") {
+        candidates.extend(
+            cargo_incremental_directories(path)
+                .into_iter()
+                .filter_map(|nested| {
+                    identify_project_cache(&nested)
+                        .filter(|kind| kind.kind == "cargo-incremental")
+                        .map(|kind| candidate(nested, kind))
+                }),
+        );
+    }
+    candidates
+}
+
+/// `incremental` directories of every profile in a Cargo target directory:
+/// `target/<profile>/incremental` and `target/<triple>/<profile>/incremental`.
+/// Symbolic links are never followed.
+fn cargo_incremental_directories(target: &Path) -> Vec<PathBuf> {
+    let real_subdirectories = |dir: &Path| -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect()
+    };
+    let is_real_directory = |path: &Path| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+    };
+    let mut found = Vec::new();
+    for child in real_subdirectories(target) {
+        for profile in std::iter::once(child.clone()).chain(real_subdirectories(&child)) {
+            let incremental = profile.join("incremental");
+            if is_real_directory(&incremental) {
+                found.push(incremental);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Whether age protects a cache from routine cleaning, and why it does not
+/// when the kind overrides age.
+fn protection(kind: &str, age_days: Option<u64>, protect_days: u64) -> (bool, Option<String>) {
+    if kind == "cargo-incremental" {
+        return (false, Some(CARGO_INCREMENTAL_NOTE.to_owned()));
+    }
+    (age_days.is_none_or(|days| days < protect_days), None)
+}
+
+/// Incremental state is only a speed-up for the next build of the same code;
+/// removing it never changes a build's result. A build in progress is detected
+/// through Cargo's own lock when the directory is removed.
+const CARGO_INCREMENTAL_NOTE: &str =
+    "the next build recreates it; refused while a Cargo build holds the target's lock";
 
 fn is_control_directory(path: &Path) -> bool {
     matches!(
@@ -519,7 +583,7 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
     }
     let modified_unix = measurement.modified_unix;
     let age_days = modified_unix.map(|modified| now.saturating_sub(modified) / 86_400);
-    let protected = age_days.is_none_or(|days| days < protect_days);
+    let (protected, protection_note) = protection(&raw.kind, age_days, protect_days);
 
     Some(CacheCandidate {
         kind: raw.kind,
@@ -532,6 +596,7 @@ fn measure_candidate(raw: RawCandidate, protect_days: u64, now: u64) -> Option<C
         modified_unix,
         age_days,
         protected,
+        protection_note,
         network_restore: raw.network_restore,
         cleanable: raw.cleanable,
         anchor: raw.anchor,
@@ -637,7 +702,8 @@ pub fn refresh_candidate(
     refreshed.allocated_bytes = measurement.allocated_bytes;
     refreshed.modified_unix = modified_unix;
     refreshed.age_days = age_days;
-    refreshed.protected = age_days.is_none_or(|days| days < protect_days);
+    (refreshed.protected, refreshed.protection_note) =
+        protection(&candidate.kind, age_days, protect_days);
     refreshed.tree_fingerprint = measurement.fingerprint;
     Ok(refreshed)
 }
@@ -991,6 +1057,164 @@ mod tests {
         assert!(refreshed.protected);
     }
 
+    /// A Cargo project whose target holds a host profile and a cross-compiled
+    /// profile, each with an incremental cache, plus an `incremental` directory
+    /// that is not inside a profile.
+    fn cargo_project_with_incremental(root: &Path) -> PathBuf {
+        let project = root.join("demo");
+        let target = project.join("target");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        for profile in [
+            target.join("debug"),
+            target.join("aarch64-apple-darwin/release"),
+        ] {
+            fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+            fs::create_dir_all(profile.join("incremental/demo-1")).unwrap();
+            fs::write(profile.join(".cargo-lock"), b"").unwrap();
+            fs::write(
+                profile.join("incremental/demo-1/query-cache.bin"),
+                [1_u8; 64],
+            )
+            .unwrap();
+            fs::write(profile.join("dep-artifact"), [2_u8; 16]).unwrap();
+        }
+        fs::create_dir_all(target.join("doc/incremental")).unwrap();
+        fs::write(target.join("doc/incremental/page"), [3_u8; 8]).unwrap();
+        target
+    }
+
+    #[test]
+    fn discovers_incremental_caches_of_every_profile_inside_a_cargo_target() {
+        let temp = tempdir().unwrap();
+        let target = cargo_project_with_incremental(temp.path());
+
+        let report = discover(&DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 7,
+        })
+        .unwrap();
+
+        let mut found: Vec<(&str, PathBuf)> = report
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.kind.as_str(), candidate.path.clone()))
+            .collect();
+        found.sort();
+        let target = target.canonicalize().unwrap();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    "cargo-incremental",
+                    target.join("aarch64-apple-darwin/release/incremental")
+                ),
+                ("cargo-incremental", target.join("debug/incremental")),
+                ("cargo-target", target.clone()),
+            ]
+        );
+    }
+
+    #[test]
+    fn incremental_caches_are_unprotected_while_their_fresh_target_is_protected() {
+        let temp = tempdir().unwrap();
+        cargo_project_with_incremental(temp.path());
+
+        let report = discover(&DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: Vec::new(),
+            protect_days: 7,
+        })
+        .unwrap();
+
+        for candidate in &report.candidates {
+            assert_eq!(candidate.age_days, Some(0), "{}", candidate.path.display());
+            if candidate.kind == "cargo-incremental" {
+                assert!(!candidate.protected);
+                assert_eq!(
+                    candidate.protection_note.as_deref(),
+                    Some(CARGO_INCREMENTAL_NOTE)
+                );
+                let refreshed = refresh_candidate(candidate, 7).unwrap();
+                assert!(!refreshed.protected);
+                assert!(refreshed.protection_note.is_some());
+            } else {
+                assert!(candidate.protected);
+                assert_eq!(candidate.protection_note, None);
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_caches_are_found_when_only_their_kind_is_requested() {
+        let temp = tempdir().unwrap();
+        cargo_project_with_incremental(temp.path());
+        let options = DiscoveryOptions {
+            roots: vec![temp.path().to_path_buf()],
+            scope: ScopeFilter::Project,
+            kinds: vec!["cargo-incremental".to_owned()],
+            protect_days: 7,
+        };
+
+        let atomic = discover(&options).unwrap();
+        let progressive = discover_with_progress(&options, |_| {}).unwrap();
+
+        for report in [atomic, progressive] {
+            assert_eq!(report.candidates.len(), 2);
+            assert!(
+                report
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.kind == "cargo-incremental")
+            );
+            assert_eq!(report.total_bytes(), 128);
+        }
+    }
+
+    #[test]
+    fn totals_count_a_cache_inside_another_listed_cache_once() {
+        let temp = tempdir().unwrap();
+        cargo_project_with_incremental(temp.path());
+
+        let report = discover_with_progress(
+            &DiscoveryOptions {
+                roots: vec![temp.path().to_path_buf()],
+                scope: ScopeFilter::Project,
+                kinds: Vec::new(),
+                protect_days: 7,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        let target = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.kind == "cargo-target")
+            .unwrap();
+        assert_eq!(report.candidates.len(), 3);
+        assert_eq!(target.bytes, 64 + 16 + 64 + 16 + 8);
+        assert_eq!(report.total_bytes(), target.bytes);
+        assert_eq!(report.total_allocated_bytes(), target.allocated_bytes);
+    }
+
+    #[test]
+    fn an_incremental_directory_outside_a_cargo_profile_is_not_recognized() {
+        let temp = tempdir().unwrap();
+        let target = cargo_project_with_incremental(temp.path());
+        let profile = target.join("debug");
+
+        assert!(identify_project_cache(&target.join("doc/incremental")).is_none());
+        fs::remove_file(profile.join(".cargo-lock")).unwrap();
+        assert!(identify_project_cache(&profile.join("incremental")).is_none());
+        fs::write(profile.join(".cargo-lock"), b"").unwrap();
+        fs::remove_file(temp.path().join("demo/Cargo.toml")).unwrap();
+        assert!(identify_project_cache(&profile.join("incremental")).is_none());
+    }
+
     #[test]
     fn recognizes_major_ecosystem_project_caches() {
         let temp = tempdir().unwrap();
@@ -1133,6 +1357,7 @@ mod tests {
             modified_unix: measurement.modified_unix,
             age_days: Some(0),
             protected: true,
+            protection_note: None,
             network_restore: false,
             cleanable: true,
             anchor: temp.path().to_path_buf(),
