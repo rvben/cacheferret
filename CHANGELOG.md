@@ -6,6 +6,12 @@ All notable changes to CacheFerret are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.6](https://github.com/rvben/cacheferret/compare/v0.5.5...v0.5.6) - 2026-10-19
+
+### Added
+
+- clean Cargo incremental caches, superseded simulator runtimes and unused Docker images ([c9921eb](https://github.com/rvben/cacheferret/commit/c9921ebc0bd736caf603f130895368b75025d9f9))
+
 ## [0.5.5](https://github.com/rvben/cacheferret/compare/v0.5.4...v0.5.5) - 2026-10-18
 
 ### Fixed
